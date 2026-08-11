@@ -42,6 +42,16 @@ For a release candidate, also install the wheel into a clean virtual environment
 
 Work is tracked in this repository's GitHub Issues. Specs and tracer-bullet tickets are published through the configured Matt Pocock skills. See `docs/agents/issue-tracker.md`.
 
+### Short-prompt execution router
+
+When the user says only `实现 #<N>`、`继续 #<N>`、`修复 #<N>` or otherwise names a GitHub Issue:
+
+1. Fetch that Issue's full body, comments, labels and blocking references from `kiwi4814/smartfire-video-testkit`.
+2. Read `CONTEXT.md`, both ADRs, the Implementation Plan, the Verification Baseline, and the Provider Contract version named in `README.md`; the user does not need to repeat these paths.
+3. Refuse to start implementation when any blocker is open or the Issue lacks `ready-for-agent`; report the exact next ready Issue instead.
+4. Use the repository's engineering skills for implementation, TDD, module/interface design and simplicity; do not require the user to name skills.
+5. Modify only the named Issue, verify through the public seams and required Python matrix, update the Verification Baseline, then stop.
+
 ### Domain docs
 
 This repository uses a single-context layout: one root `CONTEXT.md` and repository-wide ADRs under `docs/adr/`. See `docs/agents/domain.md`.
