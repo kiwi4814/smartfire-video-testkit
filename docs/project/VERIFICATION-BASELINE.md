@@ -4,7 +4,7 @@
 
 - TestKit version: `0.1.0`
 - Provider Contract: `1.0.0-draft.1`
-- Verified on: 2026-08-10
+- Verified on: 2026-08-11
 - Python used for the current environment: 3.13
 - Declared minimum Python: 3.11
 
@@ -32,6 +32,8 @@ uv build
 ```
 
 Current automated suite: 52 tests collected from eight behavior modules. Tests start real HTTP and UDP listeners on dynamically selected local ports.
+
+GitHub Actions CI is green on push to `main` for Python 3.11/3.12/3.13 (run 31467232430, head `c5890e0`), covering lint, format, mypy, pytest and build. The preceding CI failure was a `tests/conftest.py` collection-time `ImportError` (`TypeVar` imported from `collections.abc`); fixed in `c5890e0` alongside Provider Contract alignment (camelCase aliases, idempotent stream stop).
 
 ## Interpretation
 
