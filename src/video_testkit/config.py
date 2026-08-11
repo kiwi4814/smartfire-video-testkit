@@ -46,7 +46,10 @@ class Settings(BaseSettings):
     gb_registrar_addr: str = ""
     gb_password: str = "12345678"
     gb_realm: str = "3402000000"
-    gb_expires: int = Field(default=3600, ge=60, le=86400)
+    # 注册有效期秒数；下限 1 秒以支持确定性短界限测试，不等待真实 3600 秒。
+    gb_expires: int = Field(default=3600, ge=1, le=86400)
+    # 到期前提前多少秒自动发起 REGISTER 刷新（后台维护循环）。
+    gb_refresh_margin: float = Field(default=2.0, gt=0, le=300)
     gb_register_timeout: float = Field(default=3.0, gt=0, le=30)
 
     # ---- Provider 事件投递 ----

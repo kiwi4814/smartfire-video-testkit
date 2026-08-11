@@ -48,12 +48,14 @@ class SipRegistrar:
         realm: str,
         password: str,
         log_limit: int = 500,
+        nonce_ttl: timedelta = NONCE_TTL,
     ) -> None:
         self._host = host
         self._port = port
         self._realm = realm
         self._password = password
         self._log_limit = log_limit
+        self._nonce_ttl = nonce_ttl
         self._transport: asyncio.DatagramTransport | None = None
         self._nonces: dict[str, datetime] = {}
         self._requests_log: deque[dict[str, Any]] = deque(maxlen=log_limit)
@@ -128,9 +130,10 @@ class SipRegistrar:
         auth = msg.header("authorization")
         if auth is None:
             nonce = generate_nonce()
-            self._nonces[nonce] = _now() + NONCE_TTL
+            self._nonces[nonce] = _now() + self._nonce_ttl
             entry["status"] = 401
             entry["authorized"] = False
+            entry["stale"] = False
             self._requests_log.append(entry)
             transport.sendto(self._challenge(msg, nonce, stale=False), addr)
             return
@@ -154,24 +157,39 @@ class SipRegistrar:
         )
         response_ok = secrets.compare_digest(creds.get("response", ""), expected)
         if nonce_ok and response_ok and username:
-            self._registrations[username] = {
-                "username": username,
-                "contact": msg.header("contact"),
-                "expires": self._expires_of(msg),
-                "receivedAt": utc_z_now(),
-                "sourceAddress": f"{addr[0]}:{addr[1]}",
-            }
+            expires = self._expires_of(msg)
+            if expires == 0:
+                # GB28181 unregister：Expires: 0 表示注销，从注册表移除。
+                self._registrations.pop(username, None)
+            else:
+                self._registrations[username] = {
+                    "username": username,
+                    "contact": msg.header("contact"),
+                    "expires": expires,
+                    "receivedAt": utc_z_now(),
+                    "sourceAddress": f"{addr[0]}:{addr[1]}",
+                }
             entry["status"] = 200
             entry["authorized"] = True
+            entry["stale"] = False
             self._requests_log.append(entry)
             transport.sendto(self._ok(msg, username), addr)
-        else:
+        elif not nonce_ok:
+            # nonce 未知或已过期：stale=true，客户端应换新 nonce 重试。
             new_nonce = generate_nonce()
-            self._nonces[new_nonce] = _now() + NONCE_TTL
+            self._nonces[new_nonce] = _now() + self._nonce_ttl
             entry["status"] = 401
             entry["authorized"] = False
+            entry["stale"] = True
             self._requests_log.append(entry)
             transport.sendto(self._challenge(msg, new_nonce, stale=True), addr)
+        else:
+            # 凭据错误（如密码错误）：nonce 有效但响应不匹配，重试无意义。
+            entry["status"] = 401
+            entry["authorized"] = False
+            entry["stale"] = False
+            self._requests_log.append(entry)
+            transport.sendto(self._challenge(msg, nonce, stale=False), addr)
 
     # ------------------------------------------------------------ 内部
 

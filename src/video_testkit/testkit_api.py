@@ -117,6 +117,30 @@ def trigger_register(
     )
 
 
+@router.post("/devices/{external_device_id}/unregister")
+def trigger_unregister(
+    external_device_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    service: ProviderService = get_service(request)
+    service.require_device(external_device_id)
+    simulator = get_simulator(request)
+    simulator.set_known_device(external_device_id)
+
+    async def _unregister_then_mark_offline() -> None:
+        view = await simulator.trigger_unregister(external_device_id)
+        if view["status"] == "UNREGISTERED":
+            # Expires: 0 注销成功后，Provider 侧设备进入可观察离线状态。
+            service.set_device_online_status(external_device_id, "OFFLINE")
+
+    background_tasks.add_task(_unregister_then_mark_offline)
+    return ok(
+        get_request_id(request),
+        {"externalDeviceId": external_device_id, "status": "UNREGISTERING"},
+    )
+
+
 @router.get("/devices/{external_device_id}/status")
 def device_simulator_status(external_device_id: str, request: Request) -> dict[str, Any]:
     service: ProviderService = get_service(request)

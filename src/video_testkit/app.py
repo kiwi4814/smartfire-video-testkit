@@ -53,6 +53,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     stop_event = asyncio.Event()
     worker = EventsDeliveryWorker(store, settings)
     worker_task = asyncio.create_task(worker.run(stop_event))
+    simulator.start_maintenance()
 
     app.state.store = store
     app.state.service = service
@@ -75,6 +76,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         worker_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await worker_task
+        await simulator.stop_maintenance()
         if registrar is not None:
             await registrar.stop()
 

@@ -17,6 +17,10 @@
 - deterministic reset, IPC and four-channel NVR scenarios;
 - real UDP REGISTER, 401 Digest MD5 with `qop=auth`, authenticated REGISTER and 200 response;
 - wrong-password and no-response timeout paths;
+- REGISTER refresh before expiry without duplicate Protocol Source Identity (bounded short expiry);
+- `Expires: 0` unregister forming observable offline state (Simulator, Registrar registry and Provider status);
+- Provider/TestKit restart (reset) followed by deterministic re-registration with the same identity;
+- stale nonce challenge auto-retry, wrong realm rejection, duplicate and delayed UDP responses;
 - machine-readable Provider Contract Bundle validation (version `1.0.0-draft.1`, SHA-256 integrity);
 - black-box Provider Conformance Runner (`video-testkit conformance` CLI subcommand) targeting arbitrary Base URL/token;
 - automated response envelope and payload Draft 2020-12 JSON Schema assertions against `openapi.yaml`;
@@ -35,7 +39,7 @@ uv run pytest
 uv build
 ```
 
-Current automated suite: 55 tests collected from nine behavior modules. Tests start real HTTP and UDP listeners on dynamically selected local ports and exercise the contract conformance runner.
+Current automated suite: 64 tests collected from ten behavior modules. Tests start real HTTP and UDP listeners on dynamically selected local ports, exercise the contract conformance runner and the registration lifecycle via UDP proxies.
 
 GitHub Actions CI is green on push to `main` for Python 3.11/3.12/3.13 (run 31467232430, head `c5890e0`), covering lint, format, mypy, pytest and build. The preceding CI failure was a `tests/conftest.py` collection-time `ImportError` (`TypeVar` imported from `collections.abc`); fixed in `c5890e0` alongside Provider Contract alignment (camelCase aliases, idempotent stream stop).
 
@@ -45,7 +49,6 @@ This baseline proves Simulator Conformance for the implemented slice. It does no
 
 ## Unimplemented boundaries
 
-- REGISTER refresh and unregister;
 - Keepalive MESSAGE;
 - Catalog MESSAGE request/response and partial/multi-message behavior;
 - TCP SIP transport;
