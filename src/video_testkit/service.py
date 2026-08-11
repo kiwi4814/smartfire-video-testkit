@@ -610,8 +610,7 @@ class ProviderService:
             operationId=op.operation_id,
             externalDeviceId=op.external_device_id,
             status=op.status,
-            discoveredCount=op.discovered_count,
-            submittedAt=op.submitted_at,
+            discoveredCount=op.discovered_count or 0,
             completedAt=op.completed_at,
             error=op.error,
         )
@@ -628,7 +627,6 @@ class ProviderService:
             queryId=q.query_id,
             status=q.status,
             items=[self.record_item_view(i) for i in q.items],
-            submittedAt=q.submitted_at,
             completedAt=q.completed_at,
             error=q.error,
         )
@@ -662,8 +660,6 @@ class ProviderService:
                     vhost=str(s.media["vhost"]),
                     app=str(s.media["app"]),
                     streamId=str(s.media["streamId"]),
-                    codec=str(s.media["codec"]),
-                    hasAudio=bool(s.media["hasAudio"]),
                 )
                 if s.media
                 else None

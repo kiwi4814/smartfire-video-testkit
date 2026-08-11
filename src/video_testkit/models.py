@@ -155,8 +155,7 @@ class CatalogSyncResult(BaseModel):
     operation_id: str = Field(alias="operationId")
     external_device_id: str = Field(alias="externalDeviceId")
     status: CatalogOpStatus
-    discovered_count: int | None = Field(alias="discoveredCount")
-    submitted_at: AwDatetime = Field(alias="submittedAt")
+    discovered_count: int = Field(alias="discoveredCount", default=0)
     completed_at: AwDatetime | None = Field(alias="completedAt")
     error: dict[str, Any] | None = None
 
@@ -169,8 +168,6 @@ class MediaReference(BaseModel):
     vhost: str
     app: str
     stream_id: str = Field(alias="streamId")
-    codec: str
-    has_audio: bool = Field(alias="hasAudio")
 
 
 class StreamSource(BaseModel):
@@ -264,6 +261,5 @@ class RecordQueryResult(BaseModel):
     query_id: str = Field(alias="queryId")
     status: RecordQueryStatus
     items: list[RecordItem]
-    submitted_at: AwDatetime = Field(alias="submittedAt")
     completed_at: AwDatetime | None = Field(alias="completedAt")
     error: dict[str, Any] | None = None
