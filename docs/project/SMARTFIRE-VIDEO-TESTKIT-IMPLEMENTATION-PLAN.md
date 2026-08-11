@@ -170,7 +170,7 @@ Acceptance:
 - repeated stop is safe;
 - failed cases leave no permanent socket or Dialog state.
 
-Blocked by: VT-04.
+Blocked by: VT-06.
 
 ### VT-06 — Send deterministic H.264 RTP/PS to ZLMediaKit
 
@@ -282,16 +282,14 @@ Blocked by: VT-01 and the protocol slices required by the target release.
 
 ```text
 VT-01 Machine-readable contract ──────────────────────────────┐
-                                                              ├─> VT-10 Reports
-VT-02 Registration -> VT-03 Keepalive -> VT-04 Catalog -------┤
-                                      ├-> VT-05 Live signaling -> VT-06 H264 RTP/PS -> VT-08 Playback
-                                      └-> VT-07 RecordInfo ----------------------------^
+VT-02 Registration -> VT-03 Keepalive -> VT-04 Catalog -> VT-05 Live signaling -> VT-06 H264 RTP/PS
+                                                                            -> VT-07 RecordInfo -> VT-08 Playback -> VT-11 Event Callback -> VT-10 Reports
 VT-06 -> VT-09 TCP/H265/Audio
 ```
 
-Provider Event callback and reconciliation is tracked locally as `VT-11`; it depends on `VT-01` and `CONTRACT-05`, and it is a mandatory blocker of `VT-10` release reporting.
+Provider Event callback and reconciliation is tracked locally as `VT-11`; it follows `VT-08` (and requires `CONTRACT-05`) so the mandatory TestKit path has exactly one frontier, and it is a mandatory blocker of `VT-10` release reporting.
 
-The cross-project frontier is CONTRACT-06. After its Bundle is published, VT-01 is the first TestKit slice; VT-02 and later slices follow their declared local blockers. WVP and Gateway work starts only after the mandatory TestKit release report VT-10 is done.
+CONTRACT-06 and its Bundle are complete. The cross-project frontier is VT-01; VT-02 and later slices follow their declared local blockers. WVP and Gateway work starts only after the mandatory TestKit release report VT-10 is done.
 
 ## 7. Configuration policy
 
