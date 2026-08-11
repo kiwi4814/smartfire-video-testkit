@@ -105,7 +105,7 @@ Acceptance:
 - unregister leads to an eventual offline observation;
 - no test waits for real 3600-second expiry.
 
-Blocked by: none.
+Blocked by: VT-01.
 
 ### VT-03 — Add Keepalive and online/offline scenarios
 
@@ -291,7 +291,7 @@ VT-06 -> VT-09 TCP/H265/Audio
 
 Provider Event callback and reconciliation is tracked locally as `VT-11`; it depends on `VT-01` and `CONTRACT-05`, and it is a mandatory blocker of `VT-10` release reporting.
 
-Ready frontier after `0.1.0`: VT-01 when OpenAPI is available, and VT-02 immediately. Work on WVP/Gateway should prioritize VT-04 before expecting useful device discovery and VT-06 before claiming live-video success.
+The cross-project frontier is CONTRACT-06. After its Bundle is published, VT-01 is the first TestKit slice; VT-02 and later slices follow their declared local blockers. WVP and Gateway work starts only after the mandatory TestKit release report VT-10 is done.
 
 ## 7. Configuration policy
 
@@ -360,9 +360,9 @@ Version `1.0.0` is not reached until the machine-readable contract runner, Catal
 ## 12. Instructions for a fresh implementation session
 
 1. Read `AGENTS.md`, `CONTEXT.md`, ADRs and this plan.
-2. Read the GitHub issue in full, including blockers and comments.
+2. Read the local Issue under `.scratch/smartfire-video-testkit/` in full, including blockers and comments.
 3. Verify the current baseline before changing behavior.
-4. Work on one ready tracer-bullet issue only.
+4. Work on one `planned` tracer-bullet Issue only.
 5. Write the public-seam failing test first.
 6. Implement the minimum behavior to pass it.
 7. Run targeted tests, then the full required verification.

@@ -17,7 +17,7 @@ Pull requests are implementation and review artifacts, not a separate requiremen
 
 - `to-spec` writes an accepted feature specification to `.scratch/smartfire-video-testkit/spec.md`.
 - Task slicing writes one local Issue per approved tracer-bullet slice and records scoped blocker identifiers.
-- Use `planned`, `in-progress`, `blocked` and `done`; no remote label controls execution.
+- Use `planned`, `in-progress`, `blocked` and `done`; when a Matt skill emits `ready-for-agent`, store it as `planned`, or as `blocked` when any declared blocker is not `done`.
 - Do not silently rewrite the parent specification when child Issues complete.
 
 ## Lifecycle
