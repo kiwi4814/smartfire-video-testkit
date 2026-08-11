@@ -2,9 +2,9 @@
 
 ## Tracker
 
-This repository uses GitHub Issues in `kiwi4814/smartfire-video-testkit` as the authoritative work tracker.
+Development specifications and progress live under `.scratch/smartfire-video-testkit/`. The directory is intentionally ignored by Git and is the local execution tracker. The accepted implementation plan and verification baseline under `docs/project/` remain the durable recovery sources.
 
-Use GitHub Issues for:
+Use local Markdown Issues for:
 
 - accepted specifications;
 - tracer-bullet delivery tickets;
@@ -15,11 +15,11 @@ Pull requests are implementation and review artifacts, not a separate requiremen
 
 ## Skill behavior
 
-- `to-spec` publishes an accepted feature specification as a GitHub issue.
-- `to-tickets` publishes one issue per approved tracer-bullet slice and records blocking issue references.
-- Tickets ready for an implementation agent use the `ready-for-agent` label.
-- Do not silently close parent specifications when child tickets complete.
+- `to-spec` writes an accepted feature specification to `.scratch/smartfire-video-testkit/spec.md`.
+- Task slicing writes one local Issue per approved tracer-bullet slice and records scoped blocker identifiers.
+- Use `planned`, `in-progress`, `blocked` and `done`; no remote label controls execution.
+- Do not silently rewrite the parent specification when child Issues complete.
 
-## Local notes
+## Lifecycle
 
-Transient investigation notes may use `.scratch/`, which remains local and must not replace GitHub Issues as the authoritative tracker.
+Start only a `planned` Issue whose blockers are all `done`. Append verification evidence under `## Comments` before marking `done`. GitHub URLs in migrated files are historical metadata only and never need network access during implementation.

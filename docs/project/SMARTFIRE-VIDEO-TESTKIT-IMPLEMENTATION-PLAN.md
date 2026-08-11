@@ -289,6 +289,8 @@ VT-02 Registration -> VT-03 Keepalive -> VT-04 Catalog -------┤
 VT-06 -> VT-09 TCP/H265/Audio
 ```
 
+Provider Event callback and reconciliation is tracked locally as `VT-11`; it depends on `VT-01` and `CONTRACT-05`, and it is a mandatory blocker of `VT-10` release reporting.
+
 Ready frontier after `0.1.0`: VT-01 when OpenAPI is available, and VT-02 immediately. Work on WVP/Gateway should prioritize VT-04 before expecting useful device discovery and VT-06 before claiming live-video success.
 
 ## 7. Configuration policy

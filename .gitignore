@@ -8,3 +8,6 @@ dist/
 build/
 *.egg-info/
 .env
+
+# Local planning and execution records
+/.scratch/
