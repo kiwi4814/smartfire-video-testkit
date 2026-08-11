@@ -196,7 +196,10 @@ class DeviceSimulator:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 raise TimeoutError(f"等待 SIP 响应超时（{timeout:.1f}s）")
-            data, _addr = await asyncio.wait_for(protocol.queue.get(), timeout=remaining)
+            try:
+                data, _addr = await asyncio.wait_for(protocol.queue.get(), timeout=remaining)
+            except TimeoutError as exc:
+                raise TimeoutError(f"等待 SIP 响应超时（{timeout:.1f}s）") from exc
             try:
                 resp = parse_message(data)
             except ValueError:

@@ -26,9 +26,12 @@ router = APIRouter()
 
 def ok(request_id: str, data: Any) -> dict[str, Any]:
     if isinstance(data, BaseModel):
-        data = data.model_dump(mode="json")
+        data = data.model_dump(mode="json", by_alias=True)
     elif isinstance(data, list):
-        data = [d.model_dump(mode="json") if isinstance(d, BaseModel) else d for d in data]
+        data = [
+            d.model_dump(mode="json", by_alias=True) if isinstance(d, BaseModel) else d
+            for d in data
+        ]
     return {"requestId": request_id, "data": data}
 
 
@@ -101,7 +104,7 @@ def capabilities(request: Request) -> dict[str, Any]:
 def list_devices(
     request: Request,
     page: int = Query(1, ge=1),
-    page_size: int = Query(100, ge=1, le=500),
+    page_size: int = Query(100, ge=1, le=500, alias="pageSize"),
     query: str | None = Query(None, max_length=256),
     online_status: str | None = Query(None, alias="onlineStatus"),
     updated_after: str | None = Query(None, alias="updatedAfter"),
@@ -124,7 +127,7 @@ def list_channels(
     external_device_id: str,
     request: Request,
     page: int = Query(1, ge=1),
-    page_size: int = Query(100, ge=1, le=500),
+    page_size: int = Query(100, ge=1, le=500, alias="pageSize"),
     query: str | None = Query(None, max_length=256),
     online_status: str | None = Query(None, alias="onlineStatus"),
 ) -> dict[str, Any]:
@@ -146,7 +149,7 @@ def device_status(external_device_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.post("/devices/{external_device_id}/catalog-syncs", status_code=202)
-def submit_catalog_sync(
+async def submit_catalog_sync(
     external_device_id: str,
     request: Request,
     idem_key: str = Depends(require_idem_key),

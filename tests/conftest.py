@@ -12,8 +12,8 @@ from __future__ import annotations
 import socket
 import threading
 import time
-from collections.abc import Callable, Iterator, TypeVar
-from typing import Any
+from collections.abc import Callable, Iterator
+from typing import Any, TypeVar
 
 import httpx
 import pytest

@@ -73,7 +73,7 @@ def test_devices_filter_updated_after(client: httpx.Client) -> None:
     future = (datetime.now(UTC) + timedelta(days=1)).isoformat().replace("+00:00", "Z")
     data = data_of(client.get(f"/provider/v1/devices?updatedAfter={future}"))
     assert data["items"] == []
-    assert data["total"] == 2
+    assert data["total"] == 0
 
 
 def test_get_device_detail(client: httpx.Client) -> None:

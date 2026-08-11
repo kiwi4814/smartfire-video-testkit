@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 from fastapi import APIRouter, BackgroundTasks, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from video_testkit.errors import ErrorCode, provider_error
 from video_testkit.provider_api import get_request_id, get_service, ok
@@ -24,7 +24,7 @@ router = APIRouter()
 class OnlineStatusBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    online_status: str = "ONLINE"
+    online_status: str = Field(default="ONLINE", alias="onlineStatus")
 
 
 class ReadyBody(BaseModel):

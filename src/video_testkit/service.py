@@ -303,7 +303,7 @@ class ProviderService:
         return stream
 
     def stop_live_stream(self, key: str) -> None:
-        stream = self.store.live_streams.get(key)
+        stream = self.store.live_streams.pop(key, None)
         if stream is None:
             return  # 幂等 204
         stream.state = "STOPPED"
@@ -458,7 +458,7 @@ class ProviderService:
         return stream
 
     def stop_playback_stream(self, key: str) -> None:
-        stream = self.store.playback_streams.get(key)
+        stream = self.store.playback_streams.pop(key, None)
         if stream is None:
             return
         stream.state = "STOPPED"
