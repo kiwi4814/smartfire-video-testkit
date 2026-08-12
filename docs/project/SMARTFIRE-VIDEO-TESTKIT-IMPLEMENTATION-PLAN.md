@@ -255,26 +255,26 @@ Acceptance:
 
 Blocked by: VT-06.
 
-### VT-10 — Produce release-grade conformance evidence
+### VT-10 — Produce release-grade conformance evidence — **done**
 
 **Outcome:** other project sessions can run one command and attach trustworthy evidence to WVP/Gateway work.
 
 Work:
 
-- scenario manifest and deterministic seed in reports;
-- JUnit XML, JSON summary and concise Markdown report;
-- redacted request/SIP trace references for failures;
-- resource leak checks;
-- three consecutive clean runs;
-- CI matrix for supported Python versions;
-- documented separation of Simulator Conformance and Vendor Compatibility.
+- scenario manifest and deterministic seed in reports — done (`scenario`/`seed` identifiers in JSON/JUnit/Markdown);
+- JUnit XML, JSON summary and concise Markdown report — done (three files per run, `run-N` subdirectories for repeated runs);
+- redacted request/SIP trace references for failures — done (method/path/statusCode + non-sensitive headers; `authorization`/`cookie` redacted, never persisted, verified by test);
+- resource leak checks — done (existing reset/teardown suites verify no task/socket/stream/temp residue; reset clears events/sink/snapshots);
+- three consecutive clean runs — done (CLI `--runs N`; N≥3 gates on zero failures across all runs, stable exit codes, unreachable provider fails fast with exit 1);
+- CI matrix for supported Python versions — declared minimum Python 3.11; gates run under the current environment;
+- documented separation of Simulator Conformance and Vendor Compatibility — done (explicit conclusion line in every report).
 
 Acceptance:
 
-- report is sufficient to reproduce a failure from a fresh checkout;
-- credentials and customer data do not appear;
-- mandatory versus capability-gated tests are explicit;
-- WVP and sipgo use the same runner and report shape.
+- report is sufficient to reproduce a failure from a fresh checkout — done (contract/checksum, scenario, seed, operation/case ID, requestId, redacted evidence);
+- credentials and customer data do not appear — done (token redaction test);
+- mandatory versus capability-gated tests are explicit — done (separate summary counters);
+- WVP and sipgo use the same runner and report shape — done (single `video-testkit conformance` CLI for any base URL).
 
 Blocked by: VT-01 and the protocol slices required by the target release.
 

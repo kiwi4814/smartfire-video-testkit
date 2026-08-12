@@ -46,6 +46,7 @@ SmartFire 视频测试套件：**Fake Video Provider** + **GB28181 Device Simula
   - 进程级 `providerEpoch`（UUID）经 `/info` 与事件 payload 暴露；事件回调独立 Bearer token（不进入 payload/日志），`401/403` 不盲目重试、`5xx` 有界退避重试并复用同一 `eventId`
   - Callback Sink（`/testkit/v1/events/sink/*`）：运行态配置投递 URL/token、脚本化 2xx/401/403/500/延迟响应、按 `providerInstanceCode + eventId` 幂等去重、同 epoch/resource 内 revision 乱序可观察、reset 全量清理
   - inventory 对账：`/provider/v1/devices` 与通道分页返回 `snapshotToken`（绑定目录指纹），续页回传同一 token，目录变化/未知 token → `409 VIDEO_CATALOG_SNAPSHOT_EXPIRED`（retryable，整轮重启）；漏事件后全量快照对账以 Provider 目录为事实源收敛
+- **发布级 Conformance 报告（VT-10）**：`video-testkit conformance` 输出 JSON + JUnit XML + 简洁 Markdown 三份报告（contract/checksum、Provider、implementation、scenario、seed 标识；mandatory 与 capability-gated 分开统计；失败带脱敏 HTTP 证据引用——token/敏感头绝不落盘；结论固定声明 Simulator Conformance、不推断 Vendor Compatibility）；`--runs N` 支持发布 Gate（N≥3 次连续干净运行零失败）
 
 **未实现（后续切片）**：Provider 事件回调的签名认证、多实例/持久化、OpenAPI 正式发布。
 

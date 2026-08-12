@@ -17,6 +17,26 @@ from video_testkit.conformance.report import ConformanceReport, TestResult
 
 logger = logging.getLogger(__name__)
 
+# 脱敏：报告中禁止出现的头字段（token/凭据/授权信息不落盘）。
+_REDACTED_HEADERS = {"authorization", "cookie", "proxy-authorization"}
+
+
+def redact_trace(request: httpx.Request, response: httpx.Response | None) -> dict[str, Any]:
+    """生成脱敏 HTTP 证据：方法/路径/状态码/非敏感头，不含 token 与报文体。"""
+    headers = {
+        k: v
+        for k, v in request.headers.items()
+        if k.lower() not in _REDACTED_HEADERS and k.lower() not in ("x-request-id",)
+    }
+    entry: dict[str, Any] = {
+        "method": request.method,
+        "path": request.url.path,
+        "headers": headers,
+    }
+    if response is not None:
+        entry["statusCode"] = response.status_code
+    return entry
+
 
 class ConformanceRunner:
     """Provider 黑盒 Conformance Runner。"""
@@ -29,6 +49,8 @@ class ConformanceRunner:
         bundle_path: str | Path | None = None,
         provider_type: str | None = None,
         timeout: float = 10.0,
+        scenario: str = "",
+        seed: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
@@ -36,6 +58,8 @@ class ConformanceRunner:
         self.bundle_path = bundle_path
         self.override_provider_type = provider_type
         self.timeout = timeout
+        self.scenario = scenario
+        self.seed = seed
 
     def run(self) -> ConformanceReport:
         test_run_id = f"run-{uuid.uuid4().hex[:12]}"
@@ -54,10 +78,29 @@ class ConformanceRunner:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
 
-        # 2. 基础 client
-        with httpx.Client(base_url=self.base_url, headers=headers, timeout=self.timeout) as client:
-            # 3. 探查 /info 和 /capabilities
-            info_resp = client.get("/info")
+        # 2. 基础 client（event hooks 记录脱敏痕迹供失败证据引用）
+        traces: list[dict[str, Any]] = []
+
+        def on_request(request: httpx.Request) -> None:
+            traces.append(redact_trace(request, None))
+
+        def on_response(response: httpx.Response) -> None:
+            if traces:
+                traces[-1]["statusCode"] = response.status_code
+
+        with httpx.Client(
+            base_url=self.base_url,
+            headers=headers,
+            timeout=self.timeout,
+            event_hooks={"request": [on_request], "response": [on_response]},
+        ) as client:
+            # 3. 探查 /info 和 /capabilities（连接不可达时稳定失败而非崩栈）
+            try:
+                info_resp = client.get("/info")
+            except httpx.HTTPError as exc:
+                raise RuntimeError(
+                    f"Provider 不可达: {self.base_url} ({type(exc).__name__})"
+                ) from exc
             info_data = info_resp.json().get("data", {}) if info_resp.status_code == 200 else {}
 
             provider_type = (
@@ -129,6 +172,7 @@ class ConformanceRunner:
                                 "actual": str(e.actual),
                                 "message": e.message,
                             },
+                            evidence=list(traces),
                         )
                     )
                 except Exception as e:
@@ -148,6 +192,7 @@ class ConformanceRunner:
                                 "actual": type(e).__name__,
                                 "message": str(e),
                             },
+                            evidence=list(traces),
                         )
                     )
 
@@ -168,4 +213,6 @@ class ConformanceRunner:
             duration_seconds=duration_sec,
             capabilities=cap_data,
             results=results,
+            scenario=self.scenario,
+            seed=self.seed,
         )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 
 import pytest
@@ -14,7 +15,7 @@ from video_testkit.conformance.runner import ConformanceRunner
 def test_conformance_runner_against_fake_provider(server: ServerHandle) -> None:
     """测试 ConformanceRunner 能够成功校验进程内 Fake Provider。"""
     base_url = f"{server.base_url}/provider/v1"
-    runner = ConformanceRunner(base_url=base_url)
+    runner = ConformanceRunner(base_url=base_url, scenario="four-channel NVR + IPC", seed="test-42")
     report = runner.run()
 
     data = report.to_json_dict()
@@ -25,12 +26,26 @@ def test_conformance_runner_against_fake_provider(server: ServerHandle) -> None:
     assert summary["passed"] > 0
     assert data["contractVersion"] == "1.0.0-draft.1"
     assert data["providerType"] == "MOCK"
+    # VT-10：报告标识包含 scenario/seed；mandatory/gated 分开统计；结论明确。
+    assert data["scenario"] == "four-channel NVR + IPC"
+    assert data["seed"] == "test-42"
+    assert summary["mandatoryTotal"] >= 1
+    assert summary["mandatoryFailed"] == 0
+    assert summary["capabilityGatedTotal"] >= 1
+    assert data["conclusion"].startswith("Simulator Conformance")
+    assert "Vendor Compatibility" in data["conclusion"]
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        json_file, xml_file = report.save(tmp_dir)
+        json_file, xml_file, md_file = report.save(tmp_dir)
         assert json_file.exists()
         assert xml_file.exists()
+        assert md_file.exists()
         assert "<testsuites" in xml_file.read_text(encoding="utf-8")
+        md_text = md_file.read_text(encoding="utf-8")
+        assert "Provider Contract Conformance Report" in md_text
+        assert "Mandatory:" in md_text
+        assert "Conclusion" in md_text
+        assert "test-42" in md_text
 
 
 def test_conformance_runner_against_auth_provider(auth_server: ServerHandle) -> None:
@@ -46,6 +61,61 @@ def test_conformance_runner_against_auth_provider(auth_server: ServerHandle) -> 
     auth_runner = ConformanceRunner(base_url=base_url, token="test-token-123")
     auth_report = auth_runner.run()
     assert auth_report.to_json_dict()["summary"]["failed"] == 0
+
+
+def test_failed_report_evidence_redacted_and_attached(auth_server: ServerHandle) -> None:
+    """失败用例带脱敏证据：包含方法/路径/状态码，且绝不含 Authorization token。"""
+    base_url = f"{auth_server.base_url}/provider/v1"
+    runner = ConformanceRunner(base_url=base_url)  # 无 token → 401 失败
+    report = runner.run()
+    data = report.to_json_dict()
+    failed = [r for r in data["results"] if r["status"] == "FAILED"]
+    assert failed, "无 token 场景必须存在失败用例"
+    failed_with_evidence = [r for r in failed if r.get("evidence")]
+    assert failed_with_evidence, "失败用例必须携带脱敏证据"
+    serialized = json.dumps(data, ensure_ascii=False)
+    assert "test-token-123" not in serialized  # 凭据绝不落盘
+    assert "authorization" not in serialized.lower()  # 敏感头字段不出现
+    evidence = failed_with_evidence[0]["evidence"][0]
+    assert "method" in evidence and "path" in evidence
+
+
+def test_cli_conformance_runs_and_gate_exit_codes(server: ServerHandle) -> None:
+    """CLI conformance 子命令：单次运行退出码 0；重复运行产出 run-N 子目录。"""
+    import subprocess
+    import sys
+    import tempfile
+
+    base_url = f"{server.base_url}/provider/v1"
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        # 单次运行：成功 → exit 0
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "video_testkit",
+                "conformance",
+                "--base-url",
+                base_url,
+                "--report-dir",
+                tmp_dir,
+                "--runs",
+                "2",
+                "--scenario",
+                "cli-gate",
+                "--seed",
+                "seed-1",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, proc.stderr[-2000:]
+        # 多次运行产出 run-N 子目录与三份报告
+        run1 = f"{tmp_dir}/run-1"
+        assert (f"{run1}/conformance-report.json").endswith("run-1/conformance-report.json")
+        md = open(f"{run1}/conformance-report.md", encoding="utf-8").read()
+        assert "cli-gate" in md and "seed-1" in md
 
 
 def test_schema_mismatch_detection() -> None:

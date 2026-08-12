@@ -54,6 +54,7 @@
   - dropped-event scenario (CT-EVT-005): with the sink scripted 500, new events stay FAILED in the outbox (never falsely marked delivered), and a full inventory snapshot round still converges on the Provider directory as source of truth without MISSING conclusions;
 - machine-readable Provider Contract Bundle validation (version `1.0.0-draft.1`, SHA-256 integrity);
 - black-box Provider Conformance Runner (`video-testkit conformance` CLI subcommand) targeting arbitrary Base URL/token;
+- VT-10 release-grade conformance reports: JSON + JUnit XML + concise Markdown with contract version/checksum, Provider identity, implementation version/commit, scenario and deterministic seed identifiers; mandatory vs capability-gated statistics kept separate; failure evidence references (method/path/statusCode + non-sensitive headers) attached to failed cases with `authorization`/`cookie` headers redacted and never persisted; explicit conclusion stating Simulator Conformance only and not implying Vendor Compatibility; CLI `--runs N` mode for the release Gate (N≥3 consecutive clean runs with stable exit code 0, unreachable provider fails fast with exit code 1);
 - automated response envelope and payload Draft 2020-12 JSON Schema assertions against `openapi.yaml`;
 - Machine-readable JSON summary and JUnit XML conformance reports with `operationId`, `requestId`, expected and actual error details;
 - wheel and source-distribution build;
@@ -70,9 +71,9 @@ uv run pytest
 uv build
 ```
 
-Current automated suite: 171 tests collected from behavior modules. Without ZLM configuration, 171 pass and the 12 controlled ZLM integration tests skip. With `VIDEO_TESTKIT_ZLM_API_URL` and `VIDEO_TESTKIT_ZLM_API_SECRET`, all 12 ZLM tests pass against real UDP RTP/PS transport (TCP-media ZLM smoke additionally requires a ZLM configured with TCP passive mode). The suite also starts real HTTP, UDP and TCP listeners and exercises contract conformance, registration, Keepalive, Catalog, RecordInfo, live/playback signaling, media lifecycle, Provider event callback delivery and inventory reconciliation behavior.
+Current automated suite: 173 tests collected from behavior modules. Without ZLM configuration, 173 pass and the 12 controlled ZLM integration tests skip. With `VIDEO_TESTKIT_ZLM_API_URL` and `VIDEO_TESTKIT_ZLM_API_SECRET`, all 12 ZLM tests pass against real UDP RTP/PS transport (TCP-media ZLM smoke additionally requires a ZLM configured with TCP passive mode). The suite also starts real HTTP, UDP and TCP listeners and exercises contract conformance, registration, Keepalive, Catalog, RecordInfo, live/playback signaling, media lifecycle, Provider event callback delivery, inventory reconciliation and release-grade report generation behavior.
 
-Local verification on 2026-08-12: required quality gates and build passed (`171 passed, 12 skipped`); with ZLM variables enabled the full suite passed `183/183`.
+Local verification on 2026-08-12: required quality gates and build passed (`173 passed, 12 skipped`); with ZLM variables enabled the full suite passed `185/185`.
 
 ## Interpretation
 
