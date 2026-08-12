@@ -7,6 +7,7 @@ HTTP 路由只负责参数/响应形态，所有确定性逻辑（分页、过�
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
@@ -22,6 +23,7 @@ from video_testkit.idempotency import (
     IdempotencyStore,
     fingerprint_of,
 )
+from video_testkit.live_client import LiveClient
 from video_testkit.models import (
     CapabilityItem,
     CatalogSyncAccepted,
@@ -45,6 +47,7 @@ from video_testkit.models import (
 )
 from video_testkit.scenario import seed_scenario
 from video_testkit.sip.catalog import CatalogQueryError
+from video_testkit.sip.registrar import LiveInviteError
 from video_testkit.state import (
     CatalogOperation,
     ChannelState,
@@ -59,6 +62,8 @@ from video_testkit.state import (
 
 BUILD_COMMIT = "dev"
 BUILD_TIME = datetime.now(UTC)
+
+logger = logging.getLogger(__name__)
 
 CAPABILITIES: list[CapabilityItem] = [
     CapabilityItem(code="DEVICE_DISCOVERY", supported=True),
@@ -88,6 +93,8 @@ class ProviderService:
         self.idempotency = IdempotencyStore()
         # Provider 侧 Catalog 查询客户端（app 装配注入；registrar 关闭时为 None）。
         self.catalog_client: CatalogClient | None = None
+        # Provider 侧实时流信令客户端（app 装配注入；registrar 关闭时为 None）。
+        self.live_client: LiveClient | None = None
 
     # ------------------------------------------------------------ 资源查找
 
@@ -333,7 +340,35 @@ class ProviderService:
         self.store.live_streams[key] = stream
         self.store.set_active_live(device.external_device_id, channel.external_channel_id, key)
         entry.resource_ref = key
+        # 后台经真实 SIP INVITE/ACK 建立设备侧 Dialog；失败将 stream 收敛为 FAILED。
+        asyncio.get_running_loop().create_task(self._establish_live_stream(stream))
         return stream, True
+
+    async def _establish_live_stream(self, stream: LiveStreamState) -> None:
+        """后台：向设备发起真实 INVITE，建立 Dialog 后挂到 stream；失败转 FAILED。"""
+        client = self.live_client
+        if client is None:
+            return  # registrar 关闭：保持 mock STREAMING（现状行为）
+        try:
+            dialog = await client.establish(
+                stream.external_device_id,
+                timeout=self.settings.gb_live_invite_timeout,
+            )
+        except (LiveInviteError, TimeoutError) as exc:
+            if stream.state == "STREAMING":
+                stream.state = "FAILED"
+            logger.info(
+                "live stream establish failed",
+                extra={"providerStreamKey": stream.provider_stream_key, "reason": str(exc)},
+            )
+            return
+        if stream.state != "STREAMING":
+            # start 后已被 stop：立即清理设备侧 Dialog，避免遗留。
+            await client.teardown(
+                stream.external_device_id, dialog, self.settings.gb_live_bye_timeout
+            )
+            return
+        client.attach_dialog(stream.provider_stream_key, dialog)
 
     def get_live_stream(self, key: str) -> LiveStreamState:
         stream = self.store.live_streams.get(key)
@@ -352,6 +387,20 @@ class ProviderService:
         stream.state = "STOPPED"
         stream.stopped_at = now_utc()
         self.store.drop_active_live(stream.external_device_id, stream.external_channel_id, key)
+        client = self.live_client
+        if client is None:
+            return
+        dialog = client.dialog(key)
+        client.detach_dialog(key)
+        if dialog is not None:
+            # 后台经真实 BYE 拆除设备侧 Dialog；超时不影响 Provider 侧 204。
+            asyncio.get_running_loop().create_task(self._teardown_live_stream(stream, dialog))
+
+    async def _teardown_live_stream(self, stream: LiveStreamState, dialog: Any) -> None:
+        client = self.live_client
+        if client is None:
+            return
+        await client.teardown(stream.external_device_id, dialog, self.settings.gb_live_bye_timeout)
 
     # ------------------------------------------------------------ 设备录像查询
 
@@ -538,6 +587,8 @@ class ProviderService:
         s.ready_override = None
         s.event_seq = 0
         self.idempotency.clear()
+        if self.live_client is not None:
+            self.live_client.reset()
         seed_scenario(s)
         return {"devices": len(s.devices)}
 

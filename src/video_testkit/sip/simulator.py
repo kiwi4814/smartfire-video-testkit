@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import secrets
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -30,6 +31,7 @@ from video_testkit.sip.digest import (
 )
 from video_testkit.sip.keepalive import CONTENT_TYPE
 from video_testkit.sip.message import SipMessage, build_message, parse_message
+from video_testkit.sip.sdp import build_sdp_answer, parse_sdp
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +165,48 @@ def _default_catalog(device_id: str) -> list[CatalogItemData]:
     return []
 
 
+@dataclass
+class DialogState:
+    """设备侧（UAS）一次实时流 Dialog 状态。"""
+
+    call_id: str
+    from_tag: str
+    to_tag: str
+    device_id: str
+    status: str  # WAITING_ACK / ESTABLISHED / TERMINATED / FAILED
+    ssrc: str | None = None
+    media_port: int | None = None
+    target: str | None = None
+    ack_received: bool = False
+    bye_received: bool = False
+    retransmit_count: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+    timeout_task: asyncio.Task[None] | None = None
+
+
+@dataclass
+class LiveScenario:
+    """设备侧实时流应答场景（响应 Provider 的 INVITE）。
+
+    normal（立即 200 → 等 ACK）、rejection（回 4xx）、delayed（延迟 200）、
+    no-ack（200 后收不到 ACK 则 Dialog FAILED）、drop（不响应 → Provider 超时）。
+    """
+
+    mode: str = "normal"
+    delay_seconds: float = 0.0
+    reject_code: int = 486
+    ack_timeout: float = 1.5
+    revision: int = 0
+    invites_received: int = 0
+    last_error: str | None = None
+    dialogs: dict[str, DialogState] = field(default_factory=dict)
+
+
+def _dialog_to_tag() -> str:
+    return secrets.token_hex(8)
+
+
 class _ListenerProtocol(asyncio.DatagramProtocol):
     """设备常驻 UDP 监听：接收 Provider 的 Catalog 查询 MESSAGE。"""
 
@@ -215,6 +259,8 @@ class DeviceSimulator:
         # 设备侧目录场景与响应统计。
         self._catalog_scenarios: dict[str, CatalogScenario] = {}
         self._catalog_cseq: dict[str, int] = {}
+        # 设备侧实时流应答场景与 Dialog 状态。
+        self._live_scenarios: dict[str, LiveScenario] = {}
 
     # ------------------------------------------------------------ 生命周期
 
@@ -226,6 +272,7 @@ class DeviceSimulator:
         self.close_listeners()
         self._catalog_scenarios.clear()
         self._catalog_cseq.clear()
+        self._live_scenarios.clear()
         self._devices.clear()
         self._known_ids.clear()
 
@@ -276,6 +323,8 @@ class DeviceSimulator:
         self._known_ids.add(device_id)
         if device_id not in self._catalog_scenarios:
             self._catalog_scenarios[device_id] = CatalogScenario(items=_default_catalog(device_id))
+        if device_id not in self._live_scenarios:
+            self._live_scenarios[device_id] = LiveScenario()
 
     # ------------------------------------------------------------ 常驻监听与目录
 
@@ -353,15 +402,25 @@ class DeviceSimulator:
         }
 
     async def _handle_listener_datagram(self, device_id: str, data: bytes, addr: Any) -> None:
-        """处理设备收到的 UDP 报文：解析 Catalog 查询并按场景响应。"""
-        scenario = self._catalog_scenarios.get(device_id)
-        if scenario is None:
-            return
+        """处理设备收到的 UDP 报文：实时流信令（INVITE/ACK/BYE）或 Catalog 查询。"""
         try:
             msg = parse_message(data)
         except ValueError:
             return
-        if msg.method() != "MESSAGE":
+        method = msg.method()
+        if method == "INVITE":
+            await self._handle_invite(device_id, msg, addr)
+            return
+        if method == "ACK":
+            self._handle_ack(device_id, msg)
+            return
+        if method == "BYE":
+            await self._handle_bye(device_id, msg, addr)
+            return
+        if method != "MESSAGE":
+            return
+        scenario = self._catalog_scenarios.get(device_id)
+        if scenario is None:
             return
         try:
             query = parse_catalog_query(msg.body_bytes)
@@ -384,6 +443,198 @@ class DeviceSimulator:
         except Exception as exc:  # noqa: BLE001  # 上报控制面而非中断监听
             scenario.last_error = str(exc)
             logger.exception("Catalog 响应发送失败", extra={"deviceId": device_id})
+
+    # ------------------------------------------------------------ 实时流信令（UAS）
+
+    async def _handle_invite(self, device_id: str, msg: SipMessage, addr: Any) -> None:
+        """设备作为 UAS 处理 INVITE：按场景应答 SDP/200、486 或保持静默。"""
+        scenario = self._live_scenarios.get(device_id)
+        if scenario is None:
+            return
+        scenario.invites_received += 1
+        if scenario.mode == "drop":
+            return  # 静默：Provider 侧 INVITE 超时
+        try:
+            parse_sdp(msg.body)
+        except ValueError:
+            scenario.last_error = "INVITE 缺少有效 SDP"
+            return  # 无有效 offer：Provider 侧超时
+        if scenario.mode == "rejection":
+            await self._send_invite_response(
+                device_id, msg, addr, status=scenario.reject_code, reason="Busy Here"
+            )
+            return
+        if scenario.mode == "delayed" and scenario.delay_seconds > 0:
+            await asyncio.sleep(scenario.delay_seconds)
+
+        call_id = msg.header("call-id") or uuid.uuid4().hex
+        from_tag = msg.header("from") or ""
+        to_tag = _dialog_to_tag()
+        dialog = DialogState(
+            call_id=call_id,
+            from_tag=from_tag,
+            to_tag=to_tag,
+            device_id=device_id,
+            status="WAITING_ACK",
+            ssrc=self._device_ssrc(device_id),
+            media_port=self._device_media_port(device_id),
+            target=f"{addr[0]}:{addr[1]}",
+            created_at=utc_z_now(),
+            updated_at=utc_z_now(),
+        )
+        scenario.dialogs[call_id] = dialog
+        await self._send_invite_ok(device_id, msg, addr, dialog)
+        if scenario.mode == "no-ack":
+            dialog.timeout_task = asyncio.create_task(
+                self._ack_timeout(device_id, call_id, scenario.ack_timeout)
+            )
+
+    def _handle_ack(self, device_id: str, msg: SipMessage) -> None:
+        """设备收到 ACK：Dialog 进入 ESTABLISHED；no-ack 场景模拟 ACK 丢失。"""
+        scenario = self._live_scenarios.get(device_id)
+        if scenario is None or scenario.mode == "no-ack":
+            return
+        call_id = msg.header("call-id")
+        if not call_id:
+            return
+        dialog = scenario.dialogs.get(call_id)
+        if dialog is None or dialog.status != "WAITING_ACK":
+            return
+        dialog.ack_received = True
+        dialog.status = "ESTABLISHED"
+        dialog.updated_at = utc_z_now()
+        if dialog.timeout_task is not None:
+            dialog.timeout_task.cancel()
+            dialog.timeout_task = None
+
+    async def _handle_bye(self, device_id: str, msg: SipMessage, addr: Any) -> None:
+        """设备收到 BYE：Dialog 进入 TERMINATED 并回 200。"""
+        scenario = self._live_scenarios.get(device_id)
+        if scenario is None:
+            return
+        call_id = msg.header("call-id")
+        if call_id:
+            dialog = scenario.dialogs.get(call_id)
+            if dialog is not None:
+                dialog.bye_received = True
+                dialog.status = "TERMINATED"
+                dialog.updated_at = utc_z_now()
+                if dialog.timeout_task is not None:
+                    dialog.timeout_task.cancel()
+                    dialog.timeout_task = None
+        await self._send_invite_response(device_id, msg, addr, status=200, reason="OK")
+
+    async def _ack_timeout(self, device_id: str, call_id: str, timeout: float) -> None:
+        """no-ack 场景：200 后未收到 ACK，Dialog 以 FAILED 收敛。"""
+        await asyncio.sleep(timeout)
+        scenario = self._live_scenarios.get(device_id)
+        if scenario is None:
+            return
+        dialog = scenario.dialogs.get(call_id)
+        if dialog is not None and dialog.status == "WAITING_ACK":
+            dialog.status = "FAILED"
+            dialog.updated_at = utc_z_now()
+
+    async def _send_invite_ok(
+        self, device_id: str, msg: SipMessage, addr: Any, dialog: DialogState
+    ) -> None:
+        sdp = build_sdp_answer("127.0.0.1", dialog.media_port or 0, dialog.ssrc or "", "H264")
+        await self._send_invite_response(
+            device_id, msg, addr, status=200, reason="OK", to_tag=dialog.to_tag, body=sdp
+        )
+
+    async def _send_invite_response(
+        self,
+        device_id: str,
+        msg: SipMessage,
+        addr: Any,
+        *,
+        status: int,
+        reason: str,
+        to_tag: str | None = None,
+        body: str | None = None,
+    ) -> None:
+        """回显 INVITE/BYE 的 Via/From/To/Call-ID/CSeq 并返回 SIP 响应。"""
+        protocol = self._listeners.get(device_id)
+        if protocol is None or protocol.transport is None:
+            return
+        to_tag = to_tag or _dialog_to_tag()
+        headers: list[tuple[str, str]] = []
+        for name in ("via", "from", "to", "call-id", "cseq"):
+            value = msg.header(name)
+            if value:
+                headers.append((name, value))
+        for i, (name, value) in enumerate(headers):
+            if name == "to" and ";tag=" not in value:
+                headers[i] = (name, f"{value};tag={to_tag}")
+        if body is not None:
+            headers.append(("Content-Type", "application/sdp"))
+        protocol.transport.sendto(
+            build_message(f"SIP/2.0 {status} {reason}", headers, body or "", body_encoding="utf-8"),
+            tuple(addr),
+        )
+
+    @staticmethod
+    def _device_ssrc(device_id: str) -> str:
+        return f"01000000{len(device_id):02d}"
+
+    @staticmethod
+    def _device_media_port(device_id: str) -> int:
+        return 20000 + (sum(ord(c) for c in device_id) % 1000)
+
+    # ------------------------------------------------------------ 实时流控制面
+
+    def configure_live(
+        self,
+        device_id: str,
+        *,
+        mode: str = "normal",
+        delay_seconds: float = 0.0,
+        reject_code: int = 486,
+        ack_timeout: float = 1.5,
+    ) -> dict[str, Any]:
+        """安排设备实时流应答场景；每次安排 revision 递增。"""
+        self._require_known(device_id)
+        scenario = self._live_scenarios[device_id]
+        scenario.mode = mode
+        scenario.delay_seconds = float(delay_seconds)
+        scenario.reject_code = int(reject_code)
+        scenario.ack_timeout = float(ack_timeout)
+        scenario.last_error = None
+        scenario.revision += 1
+        return self.live_status(device_id)
+
+    def live_status(self, device_id: str) -> dict[str, Any]:
+        """设备实时流场景与 Dialog 诊断（控制面可查，脱敏视图）。"""
+        self._require_known(device_id)
+        scenario = self._live_scenarios[device_id]
+        return {
+            "externalDeviceId": device_id,
+            "mode": scenario.mode,
+            "delaySeconds": scenario.delay_seconds,
+            "rejectCode": scenario.reject_code,
+            "ackTimeoutSeconds": scenario.ack_timeout,
+            "revision": str(scenario.revision),
+            "invitesReceived": scenario.invites_received,
+            "lastError": scenario.last_error,
+            "dialogs": [self._dialog_view(d) for d in scenario.dialogs.values()],
+        }
+
+    @staticmethod
+    def _dialog_view(dialog: DialogState) -> dict[str, Any]:
+        """Dialog 脱敏诊断视图：Call-ID 截断，不暴露完整 SIP 运行态身份。"""
+        return {
+            "callId": f"{dialog.call_id[:8]}…",
+            "deviceId": dialog.device_id,
+            "status": dialog.status,
+            "ssrc": dialog.ssrc,
+            "mediaPort": dialog.media_port,
+            "target": dialog.target,
+            "ackReceived": dialog.ack_received,
+            "byeReceived": dialog.bye_received,
+            "createdAt": dialog.created_at,
+            "updatedAt": dialog.updated_at,
+        }
 
     def _catalog_responses(
         self, device_id: str, query_sn: int, scenario: CatalogScenario

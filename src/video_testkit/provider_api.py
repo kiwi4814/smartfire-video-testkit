@@ -171,7 +171,7 @@ def get_catalog_sync(operation_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.post("/live-streams")
-def start_live_stream(
+async def start_live_stream(
     request: Request,
     body: LiveStartRequest,
     idem_key: str = Depends(require_idem_key),
@@ -190,7 +190,7 @@ def get_live_stream(provider_stream_key: str, request: Request) -> dict[str, Any
 
 
 @router.delete("/live-streams/{provider_stream_key}", status_code=204)
-def stop_live_stream(provider_stream_key: str, request: Request) -> Response:
+async def stop_live_stream(provider_stream_key: str, request: Request) -> Response:
     service = get_service(request)
     service.stop_live_stream(provider_stream_key)
     return Response(status_code=204)

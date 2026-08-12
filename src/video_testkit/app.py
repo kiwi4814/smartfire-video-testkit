@@ -17,6 +17,7 @@ from video_testkit.catalog_client import CatalogClient
 from video_testkit.config import Settings, get_settings
 from video_testkit.errors import ErrorCode, ErrorEnvelope, ProviderError
 from video_testkit.events import EventsDeliveryWorker
+from video_testkit.live_client import LiveClient
 from video_testkit.logging_conf import configure_logging, log_ctx, request_id_var
 from video_testkit.provider_api import router as provider_router
 from video_testkit.scenario import seed_scenario
@@ -53,6 +54,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         await registrar.start()  # 绑定失败即启动失败（fail fast）
         service.catalog_client = CatalogClient(registrar, simulator)
+        service.live_client = LiveClient(registrar, simulator)
 
     stop_event = asyncio.Event()
     worker = EventsDeliveryWorker(store, settings)

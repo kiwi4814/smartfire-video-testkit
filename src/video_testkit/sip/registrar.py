@@ -11,6 +11,7 @@ import secrets
 import uuid
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -26,10 +27,35 @@ from video_testkit.sip.catalog import (
 from video_testkit.sip.digest import compute_response, generate_nonce, parse_params
 from video_testkit.sip.keepalive import CONTENT_TYPE, parse_keepalive_xml
 from video_testkit.sip.message import SipMessage, build_message, parse_message
+from video_testkit.sip.sdp import build_sdp_offer
 
 logger = logging.getLogger(__name__)
 
 NONCE_TTL = timedelta(minutes=5)
+
+
+@dataclass
+class LiveDialog:
+    """Provider 侧（UAC）实时流 Dialog 运行态（不进入 Provider Interface）。"""
+
+    call_id: str
+    from_tag: str
+    to_tag: str
+    branch: str
+    device_id: str
+    ssrc: str | None = None
+    media_port: int | None = None
+    target: str | None = None
+
+
+class LiveInviteError(Exception):
+    """INVITE 被设备拒绝或不可达（Provider 侧稳定失败）。"""
+
+
+def _tag_of(value: str | None) -> str:
+    if not value or ";tag=" not in value:
+        return ""
+    return value.split(";tag=", 1)[1].split(";", 1)[0].strip()
 
 
 def _now() -> datetime:
@@ -69,6 +95,14 @@ class _CatalogSession:
         self.settle_timer: asyncio.TimerHandle | None = None
 
 
+@dataclass
+class _UacSession:
+    """一次进行中的 UAC 事务（INVITE/BYE），等待匹配的最终响应。"""
+
+    kind: str
+    future: asyncio.Future[tuple[int, SipMessage]]
+
+
 class SipRegistrar:
     """UDP SIP 服务器：仅处理 REGISTER（401 Digest 挑战 -> 校验 -> 200）。"""
 
@@ -97,6 +131,9 @@ class SipRegistrar:
         # Provider 侧 Catalog 查询会话（每设备最多一个进行中查询）。
         self._catalog_sessions: dict[str, _CatalogSession] = {}
         self._catalog_query_seq: dict[str, int] = {}
+        # Provider 侧 UAC 事务（INVITE/BYE），按 Via branch 匹配响应。
+        self._uac_sessions: dict[str, _UacSession] = {}
+        self._uac_cseq: int = 0
 
     # ------------------------------------------------------------ 生命周期
 
@@ -128,6 +165,11 @@ class SipRegistrar:
                 session.future.cancel()
         self._catalog_sessions.clear()
         self._catalog_query_seq.clear()
+        for uac in self._uac_sessions.values():
+            if not uac.future.done():
+                uac.future.cancel()
+        self._uac_sessions.clear()
+        self._uac_cseq = 0
 
     # ------------------------------------------------------------ 查询（控制面）
 
@@ -149,6 +191,11 @@ class SipRegistrar:
             msg = parse_message(data)
         except ValueError:
             logger.debug("registrar: 丢弃无法解析的 UDP 报文")
+            return
+
+        if not msg.is_request:
+            # 响应报文：匹配进行中的 UAC 事务（INVITE/BYE 的最终响应）。
+            self._dispatch_uac_response(msg)
             return
 
         entry: dict[str, Any] = {
@@ -378,6 +425,169 @@ class SipRegistrar:
                 complete=False,
             )
         )
+
+    # ------------------------------------------------------------ UAC 事务（实时流）
+
+    async def invite_device(
+        self,
+        device_id: str,
+        target: tuple[str, int],
+        timeout: float,
+    ) -> LiveDialog:
+        """向设备发送 INVITE（SDP offer），2xx 后发 ACK 并返回 Dialog。
+
+        4xx-6xx 抛 ``LiveInviteError``；无响应超时抛 ``TimeoutError``。
+        """
+        if self._transport is None:
+            raise LiveInviteError("Registrar 未启动")
+        loop = asyncio.get_running_loop()
+        self._uac_cseq += 1
+        branch = "z9hG4bK" + uuid.uuid4().hex[:20]
+        call_id = uuid.uuid4().hex
+        from_tag = uuid.uuid4().hex[:12]
+        ssrc = f"01000000{self._uac_cseq % 100:02d}"
+        media_port = 30000 + (self._uac_cseq * 37) % 1000
+        body = build_sdp_offer("127.0.0.1", media_port, ssrc, "H264")
+
+        future: asyncio.Future[tuple[int, SipMessage]] = loop.create_future()
+        self._uac_sessions[branch] = _UacSession("INVITE", future)
+        try:
+            self._send_invite(device_id, target, call_id, branch, from_tag, body)
+            status, resp = await asyncio.wait_for(future, timeout=timeout)
+        finally:
+            self._uac_sessions.pop(branch, None)
+
+        if not (200 <= status < 300):
+            raise LiveInviteError(f"INVITE 被设备拒绝: {status}")
+        to_tag = _tag_of(resp.header("to"))
+        dialog = LiveDialog(
+            call_id=call_id,
+            from_tag=from_tag,
+            to_tag=to_tag,
+            branch=branch,
+            device_id=device_id,
+            ssrc=ssrc,
+            media_port=media_port,
+            target=f"{target[0]}:{target[1]}",
+        )
+        self._send_ack(device_id, target, call_id, from_tag, to_tag)
+        return dialog
+
+    async def send_bye(self, dialog: LiveDialog, target: tuple[str, int], timeout: float) -> bool:
+        """向设备发送 BYE 并等待 200；超时返回 False（Provider 侧仍清理）。"""
+        if self._transport is None:
+            return False
+        loop = asyncio.get_running_loop()
+        self._uac_cseq += 1
+        branch = "z9hG4bK" + uuid.uuid4().hex[:20]
+        future: asyncio.Future[tuple[int, SipMessage]] = loop.create_future()
+        self._uac_sessions[branch] = _UacSession("BYE", future)
+        try:
+            self._send_bye(dialog, target, branch)
+            status, _resp = await asyncio.wait_for(future, timeout=timeout)
+            return 200 <= status < 300
+        except TimeoutError:
+            return False
+        finally:
+            self._uac_sessions.pop(branch, None)
+
+    def _dispatch_uac_response(self, msg: SipMessage) -> None:
+        via = msg.header("via") or ""
+        branch = ""
+        for part in via.split(";"):
+            if part.startswith("branch="):
+                branch = part.split("=", 1)[1]
+                break
+        if not branch:
+            return
+        session = self._uac_sessions.get(branch)
+        if session is None or session.future.done():
+            return
+        status = msg.status_code() or 0
+        session.future.set_result((status, msg))
+
+    def _send_invite(
+        self,
+        device_id: str,
+        target: tuple[str, int],
+        call_id: str,
+        branch: str,
+        from_tag: str,
+        body: str,
+    ) -> None:
+        assert self._transport is not None, "Registrar 未启动"
+        host, port = target
+        uri = f"sip:{device_id}@{host}:{port}"
+        headers: list[tuple[str, str]] = [
+            (
+                "Via",
+                f"SIP/2.0/UDP {self._host}:{self._port};branch={branch};rport",
+            ),
+            (
+                "From",
+                f"<sip:{PROVIDER_SIP_ID}@{self._host}:{self._port}>;tag={from_tag}",
+            ),
+            ("To", f"<{uri}>"),
+            ("Call-ID", call_id),
+            ("CSeq", f"{self._uac_cseq} INVITE"),
+            ("Max-Forwards", "70"),
+            ("Content-Type", "application/sdp"),
+            ("User-Agent", "SmartFire-TestKit-Registrar/0.1.0"),
+        ]
+        self._transport.sendto(build_message(f"INVITE {uri} SIP/2.0", headers, body), target)
+
+    def _send_ack(
+        self,
+        device_id: str,
+        target: tuple[str, int],
+        call_id: str,
+        from_tag: str,
+        to_tag: str,
+    ) -> None:
+        assert self._transport is not None, "Registrar 未启动"
+        host, port = target
+        uri = f"sip:{device_id}@{host}:{port}"
+        branch = "z9hG4bK" + uuid.uuid4().hex[:20]
+        headers: list[tuple[str, str]] = [
+            (
+                "Via",
+                f"SIP/2.0/UDP {self._host}:{self._port};branch={branch};rport",
+            ),
+            (
+                "From",
+                f"<sip:{PROVIDER_SIP_ID}@{self._host}:{self._port}>;tag={from_tag}",
+            ),
+            ("To", f"<{uri}>;tag={to_tag}"),
+            ("Call-ID", call_id),
+            ("CSeq", f"{self._uac_cseq} ACK"),
+            ("Max-Forwards", "70"),
+        ]
+        self._transport.sendto(build_message(f"ACK {uri} SIP/2.0", headers), target)
+
+    def _send_bye(
+        self,
+        dialog: LiveDialog,
+        target: tuple[str, int],
+        branch: str,
+    ) -> None:
+        assert self._transport is not None, "Registrar 未启动"
+        host, port = target
+        uri = f"sip:{dialog.device_id}@{host}:{port}"
+        headers: list[tuple[str, str]] = [
+            (
+                "Via",
+                f"SIP/2.0/UDP {self._host}:{self._port};branch={branch};rport",
+            ),
+            (
+                "From",
+                f"<sip:{PROVIDER_SIP_ID}@{self._host}:{self._port}>;tag={dialog.from_tag}",
+            ),
+            ("To", f"<{uri}>;tag={dialog.to_tag}"),
+            ("Call-ID", dialog.call_id),
+            ("CSeq", f"{self._uac_cseq} BYE"),
+            ("Max-Forwards", "70"),
+        ]
+        self._transport.sendto(build_message(f"BYE {uri} SIP/2.0", headers), target)
 
     def _handle_keepalive(
         self,

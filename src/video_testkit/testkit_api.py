@@ -259,6 +259,45 @@ def catalog_status(external_device_id: str, request: Request) -> dict[str, Any]:
     return ok(get_request_id(request), simulator.catalog_status(external_device_id))
 
 
+class LiveBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mode: str = Field(default="normal")
+    delay_seconds: float = Field(default=0.0, ge=0, le=10)
+    reject_code: int = Field(default=486, ge=400, le=699)
+    ack_timeout_seconds: float = Field(default=1.5, gt=0, le=10, alias="ackTimeoutSeconds")
+
+
+@router.post("/devices/{external_device_id}/live")
+def configure_live(
+    external_device_id: str,
+    request: Request,
+    body: LiveBody,
+) -> dict[str, Any]:
+    """安排设备实时流应答场景（normal/rejection/delayed/no-ack/drop）。"""
+    simulator = get_simulator(request)
+    service: ProviderService = get_service(request)
+    service.require_device(external_device_id)
+    simulator.set_known_device(external_device_id)
+    view = simulator.configure_live(
+        external_device_id,
+        mode=body.mode,
+        delay_seconds=body.delay_seconds,
+        reject_code=body.reject_code,
+        ack_timeout=body.ack_timeout_seconds,
+    )
+    return ok(get_request_id(request), view)
+
+
+@router.get("/devices/{external_device_id}/live")
+def live_status(external_device_id: str, request: Request) -> dict[str, Any]:
+    """查看设备实时流场景与 Dialog 脱敏诊断。"""
+    simulator = get_simulator(request)
+    service: ProviderService = get_service(request)
+    service.require_device(external_device_id)
+    return ok(get_request_id(request), simulator.live_status(external_device_id))
+
+
 @router.get("/devices/{external_device_id}/status")
 def device_simulator_status(external_device_id: str, request: Request) -> dict[str, Any]:
     service: ProviderService = get_service(request)
