@@ -9,6 +9,7 @@ SmartFire 视频测试套件：**Fake Video Provider** + **GB28181 Device Simula
 
 - [完整实施计划](docs/project/SMARTFIRE-VIDEO-TESTKIT-IMPLEMENTATION-PLAN.md)
 - [当前验证基线](docs/project/VERIFICATION-BASELINE.md)
+- [ZLM 集成环境（VT-06 依赖，端口/Secret/验证命令）](docs/project/ZLM-INTEGRATION.md)
 - [统一术语](CONTEXT.md)
 - [架构决策](docs/adr/)
 - [AI 开发规则](AGENTS.md)

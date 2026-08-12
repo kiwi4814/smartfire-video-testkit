@@ -11,3 +11,4 @@ build/
 
 # Local planning and execution records
 /.scratch/
+.zlm/
