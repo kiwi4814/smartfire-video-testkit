@@ -69,12 +69,23 @@ BUILD_TIME = datetime.now(UTC)
 
 logger = logging.getLogger(__name__)
 
+# VT-09 可选能力通过契约允许的 constraints 表达（CapabilityCode 枚举固定 14 项，
+# 不新增枚举；constraints 为 additionalProperties: true 的自由对象）。
+_MEDIA_CAPABILITY_CONSTRAINTS: dict[str, Any] = {
+    "codecs": ["H264", "H265"],
+    "audioCodecs": ["G711A"],
+    "signalingTransports": ["UDP", "TCP"],
+    "mediaTransports": ["UDP", "TCP"],
+}
+
 CAPABILITIES: list[CapabilityItem] = [
     CapabilityItem(code="DEVICE_DISCOVERY", supported=True),
     CapabilityItem(code="CATALOG_SYNC", supported=True),
-    CapabilityItem(code="LIVE_STREAM", supported=True),
+    CapabilityItem(code="LIVE_STREAM", supported=True, constraints=_MEDIA_CAPABILITY_CONSTRAINTS),
     CapabilityItem(code="DEVICE_RECORD_QUERY", supported=True),
-    CapabilityItem(code="DEVICE_RECORD_PLAYBACK", supported=True),
+    CapabilityItem(
+        code="DEVICE_RECORD_PLAYBACK", supported=True, constraints=_MEDIA_CAPABILITY_CONSTRAINTS
+    ),
     CapabilityItem(code="PROVIDER_EVENTS", supported=True),
     CapabilityItem(code="SNAPSHOT", supported=False),
     CapabilityItem(code="PTZ", supported=False),
@@ -381,6 +392,7 @@ class ProviderService:
                     stream_id,
                     port=rtp_port,
                     ssrc=int(dialog.ssrc, 10) & 0xFFFFFFFF,
+                    tcp_mode=1 if getattr(dialog, "media_transport", "UDP") == "TCP" else 0,
                 )
                 online = await zlm.wait_stream_online(
                     stream_id, self.settings.zlm_stream_online_timeout
@@ -654,6 +666,7 @@ class ProviderService:
                     stream_id,
                     port=rtp_port,
                     ssrc=int(dialog.ssrc, 10) & 0xFFFFFFFF,
+                    tcp_mode=1 if getattr(dialog, "media_transport", "UDP") == "TCP" else 0,
                 )
                 online = await zlm.wait_stream_online(
                     stream_id, self.settings.zlm_stream_online_timeout

@@ -55,6 +55,13 @@ def test_capabilities(client: httpx.Client) -> None:
     assert caps["DEVICE_RECORD_QUERY"] is True
     assert caps["DEVICE_RECORD_PLAYBACK"] is True
     assert caps["PROVIDER_EVENTS"] is True
+    # VT-09 可选能力：以契约允许的 constraints 声明（不新增枚举 code）。
+    live = next(c for c in data["capabilities"] if c["code"] == "LIVE_STREAM")
+    constraints = live["constraints"]
+    assert constraints["codecs"] == ["H264", "H265"]
+    assert constraints["audioCodecs"] == ["G711A"]
+    assert constraints["signalingTransports"] == ["UDP", "TCP"]
+    assert constraints["mediaTransports"] == ["UDP", "TCP"]
     assert caps["SNAPSHOT"] is False
     assert caps["PTZ"] is False
     assert caps["PLAYBACK_SEEK"] is False

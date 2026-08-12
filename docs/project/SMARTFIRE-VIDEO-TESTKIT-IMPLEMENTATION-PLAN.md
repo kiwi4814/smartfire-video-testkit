@@ -236,22 +236,22 @@ Acceptance:
 
 Blocked by: VT-06 and VT-07.
 
-### VT-09 — Add TCP, H.265 and audio capability slices
+### VT-09 — Add TCP, H.265 and audio capability slices — **done**
 
 **Outcome:** optional transport and codec capabilities are tested independently and advertised accurately.
 
 Work is split into separate sub-slices when implemented:
 
-- SIP over TCP;
-- RTP over TCP where required;
-- H.265 fixture and packetization;
-- audio-bearing PS fixture.
+- SIP over TCP — done (device TCP listener with Content-Length framing; Provider UAC INVITE/ACK/BYE over the same TCP connection; `transport: "TCP"` scene control);
+- RTP over TCP where required — done (GB28181 4-byte framing `0x24 0x00` + length; device connects to media endpoint; `mediaTransport: "TCP"` scene control; ZLM `tcp_mode=1` wiring);
+- H.265 fixture and packetization — done (libx265 synthetic fixture; PSM `stream_type=0x24` with CRC-32/MPEG-2; SDP `H265/90000`; `codec: "H265"` scene control);
+- audio-bearing PS fixture — done (synthetic G.711A fixture; per-frame audio PES `0xC0` with PSM `stream_type=0x90`; `hasAudio` scene control, combinable with H.264/H.265).
 
 Acceptance:
 
-- each capability is independently selectable and reportable;
-- unsupported combinations fail explicitly;
-- adding a codec or transport does not change H.264/UDP baseline behavior.
+- each capability is independently selectable and reportable — done (four independent scene knobs; capability declaration via contract-permitted `constraints` on `LIVE_STREAM`/`DEVICE_RECORD_PLAYBACK`);
+- unsupported combinations fail explicitly — done (unknown codec/transport/mediaTransport values return 400 `VIDEO_INVALID_ARGUMENT`);
+- adding a codec or transport does not change H.264/UDP baseline behavior — done (baseline-byte and behavior regression tests green).
 
 Blocked by: VT-06.
 

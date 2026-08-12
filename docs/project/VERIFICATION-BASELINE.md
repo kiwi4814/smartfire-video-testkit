@@ -40,6 +40,12 @@
 - playback error mapping validates `VIDEO_RECORD_NOT_FOUND` (404), `VIDEO_RECORD_MISMATCH` (409) for device/channel/time range mismatch, and `VIDEO_DEVICE_OFFLINE` (422);
 - playback scenario controls via `/testkit/v1/devices/{id}/playback` (normal, rejection 486, delayed, no-ack, drop, none, wrong-ssrc) with observable Dialog diagnostics and media stats;
 - playback media ZLM integration smoke proves stream-online transition to STREAMING, `rtp/{streamId}` media online, no-media/wrong-SSRC FAILED convergence, DELETE BYE teardown, and double-reset orphan RTP port cleanup;
+- VT-09 optional capability pack (each independently selectable, H.264/UDP baseline unchanged):
+  - H.265 media scenario: redistribution-safe synthetic H.265 fixture (1280×720, 25 fps, 1 second, libx265, SHA-256 recorded; VPS/SPS/PPS/SEI/IDR structure), PS muxing with HEVC Program Stream Map (`stream_type=0x24`, PES `0xE0`, CRC-32/MPEG-2 recomputed), SDP negotiation via `a=rtpmap:98 H265/90000`, scene control `codec: "H265"` on `/testkit/v1` with media-sent observability; unknown codec values fail explicitly with 400 (no silent fallback);
+  - G.711A audio scenario: redistribution-safe synthetic audio fixture (8000 Hz, mono, 1 second, SHA-256 recorded), per-frame audio PES (`0xC0`, PTS-synchronized) with PSM `stream_type=0x90` declaration (H.264 and H.265 combinations), scene control `hasAudio: true`, independent of codec selection;
+  - SIP over TCP signaling: device persistent TCP listener with Content-Length framing, Provider UAC INVITE/ACK/BYE transactions over the same TCP connection, scene control `transport: "TCP"`; Dialog established/terminated, rejection→FAILED and drop→timeout FAILED all verified over real TCP packets; UDP signaling baseline unchanged;
+  - RTP over TCP media: GB28181 4-byte framing (`0x24 0x00` + big-endian length) per RTP packet, device connects to the media endpoint (`mediaTransport: "TCP"`), bounded failure convergence when no endpoint listens, ZLM `openRtpServer` `tcp_mode=1` wiring when media transport is TCP; unknown media transport fails explicitly with 400;
+  - capability declaration stays within the fixed 14-item `CapabilityCode` enum (contract authority); the supported codec/audio/transport sets are declared via the contract-permitted `constraints` object on `LIVE_STREAM` and `DEVICE_RECORD_PLAYBACK` (`codecs`, `audioCodecs`, `signalingTransports`, `mediaTransports`), keeping declarations consistent with actually executable scenarios;
 - machine-readable Provider Contract Bundle validation (version `1.0.0-draft.1`, SHA-256 integrity);
 - black-box Provider Conformance Runner (`video-testkit conformance` CLI subcommand) targeting arbitrary Base URL/token;
 - automated response envelope and payload Draft 2020-12 JSON Schema assertions against `openapi.yaml`;
@@ -58,17 +64,16 @@ uv run pytest
 uv build
 ```
 
-Current automated suite: 141 tests collected from eighteen behavior modules. Without ZLM configuration, 129 pass and the 12 controlled ZLM integration tests skip. With `VIDEO_TESTKIT_ZLM_API_URL` and `VIDEO_TESTKIT_ZLM_API_SECRET`, all 12 ZLM tests pass against real UDP RTP/PS transport. The suite also starts real HTTP and UDP listeners and exercises contract conformance, registration, Keepalive, Catalog, RecordInfo, live/playback signaling and media lifecycle behavior.
+Current automated suite: 157 tests collected from behavior modules. Without ZLM configuration, 157 pass and the 12 controlled ZLM integration tests skip. With `VIDEO_TESTKIT_ZLM_API_URL` and `VIDEO_TESTKIT_ZLM_API_SECRET`, all 12 ZLM tests pass against real UDP RTP/PS transport (TCP-media ZLM smoke additionally requires a ZLM configured with TCP passive mode). The suite also starts real HTTP, UDP and TCP listeners and exercises contract conformance, registration, Keepalive, Catalog, RecordInfo, live/playback signaling and media lifecycle behavior, including the VT-09 H.265/audio/TCP optional scenarios.
 
-Local verification on 2026-08-12: required quality gates and build passed (`129 passed, 12 skipped`); with ZLM variables enabled the full suite passed `141/141`.
+Local verification on 2026-08-12: required quality gates and build passed (`157 passed, 12 skipped`); with ZLM variables enabled the full suite passed `169/169`.
 
 ## Interpretation
 
-This baseline proves Simulator Conformance for deterministic UDP H.264 RTP/PS, deterministic device RecordInfo over real SIP MESSAGE, deterministic device playback media over SIP/RTP/PS and the controlled ZLMediaKit environment. It does not prove GB28181 certification, physical-camera interoperability, H.265/audio/TCP media or production performance.
+This baseline proves Simulator Conformance for deterministic UDP H.264 RTP/PS, deterministic device RecordInfo over real SIP MESSAGE, deterministic device playback media over SIP/RTP/PS, the VT-09 optional capability pack (H.265, G.711A audio, SIP over TCP, RTP over TCP) and the controlled ZLMediaKit environment. It does not prove GB28181 certification, physical-camera interoperability, real-vendor compatibility or production performance.
 
 ## Unimplemented boundaries
 
-- TCP SIP transport;
-- optional TCP/H.265/audio media scenarios;
 - signed Provider event callbacks;
-- real-vendor compatibility matrix.
+- real-vendor compatibility matrix;
+- H.265/audio/TCP-media arrival verified against a real ZLMediaKit TCP passive-mode receiver (UDP arrival is proven in the baseline; TCP-media smoke is available on request with the matching ZLM configuration).

@@ -54,11 +54,15 @@ class ZlmClient:
         stream_id: str,
         port: int | None = None,
         ssrc: int | None = None,
+        tcp_mode: int = 0,
     ) -> int:
-        """开启 RTP 接收端口并绑定 stream_id/可选 SSRC；返回实际端口。"""
+        """开启 RTP 接收端口并绑定 stream_id/可选 SSRC；返回实际端口。
+
+        ``tcp_mode``：0=UDP（基线），1=TCP 被动（设备主动连接，VT-09 可选能力）。
+        """
         params: dict[str, Any] = {
             "stream_id": stream_id,
-            "tcp_mode": 0,
+            "tcp_mode": tcp_mode,
             "port": port if port is not None else self.next_rtp_port(),
         }
         if ssrc is not None:

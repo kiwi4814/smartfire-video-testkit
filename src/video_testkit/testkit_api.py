@@ -16,7 +16,7 @@ from video_testkit.provider_api import get_request_id, get_service, ok
 from video_testkit.scenario import scenario_summary
 from video_testkit.service import ProviderService
 from video_testkit.sip.registrar import SipRegistrar
-from video_testkit.sip.simulator import DeviceSimulator
+from video_testkit.sip.simulator import DeviceSimulator, SimulatorError
 from video_testkit.state import Store
 from video_testkit.zlm_client import ZlmError
 
@@ -324,6 +324,14 @@ class LiveBody(BaseModel):
     media_mode: str = Field(default="normal", alias="mediaMode")
     media_loss_rate: float = Field(default=0.0, ge=0, lt=1, alias="mediaLossRate")
     media_stop_after_seconds: float = Field(default=0.0, ge=0, le=60, alias="mediaStopAfterSeconds")
+    # VT-09 可选能力：H264（基线）/ H265；不支持值在 simulator 层显式拒绝。
+    codec: str = Field(default="H264")
+    # VT-09 可选能力：是否附带 G.711A 音频轨（独立于 codec 选择）。
+    has_audio: bool = Field(default=False, alias="hasAudio")
+    # VT-09 可选能力：SIP 信令传输方式 UDP（基线）/ TCP。
+    transport: str = Field(default="UDP")
+    # VT-09 可选能力：媒体传输方式 UDP（基线）/ TCP（设备主动连接媒体端点）。
+    media_transport: str = Field(default="UDP", alias="mediaTransport")
 
 
 @router.post("/devices/{external_device_id}/live")
@@ -337,16 +345,25 @@ def configure_live(
     service: ProviderService = get_service(request)
     service.require_device(external_device_id)
     simulator.set_known_device(external_device_id)
-    view = simulator.configure_live(
-        external_device_id,
-        mode=body.mode,
-        delay_seconds=body.delay_seconds,
-        reject_code=body.reject_code,
-        ack_timeout=body.ack_timeout_seconds,
-        media_mode=body.media_mode,
-        media_loss_rate=body.media_loss_rate,
-        media_stop_after_seconds=body.media_stop_after_seconds,
-    )
+    try:
+        view = simulator.configure_live(
+            external_device_id,
+            mode=body.mode,
+            delay_seconds=body.delay_seconds,
+            reject_code=body.reject_code,
+            ack_timeout=body.ack_timeout_seconds,
+            media_mode=body.media_mode,
+            media_loss_rate=body.media_loss_rate,
+            media_stop_after_seconds=body.media_stop_after_seconds,
+            codec=body.codec,
+            has_audio=body.has_audio,
+            transport=body.transport,
+            media_transport=body.media_transport,
+        )
+    except SimulatorError as exc:
+        raise provider_error(
+            ErrorCode.VIDEO_INVALID_ARGUMENT, str(exc), {"externalDeviceId": external_device_id}
+        ) from exc
     return ok(get_request_id(request), view)
 
 
@@ -369,6 +386,14 @@ class PlaybackBody(BaseModel):
     media_mode: str = Field(default="normal", alias="mediaMode")
     media_loss_rate: float = Field(default=0.0, ge=0, lt=1, alias="mediaLossRate")
     media_stop_after_seconds: float = Field(default=0.0, ge=0, le=60, alias="mediaStopAfterSeconds")
+    # VT-09 可选能力：H264（基线）/ H265；不支持值在 simulator 层显式拒绝。
+    codec: str = Field(default="H264")
+    # VT-09 可选能力：是否附带 G.711A 音频轨（独立于 codec 选择）。
+    has_audio: bool = Field(default=False, alias="hasAudio")
+    # VT-09 可选能力：SIP 信令传输方式 UDP（基线）/ TCP。
+    transport: str = Field(default="UDP")
+    # VT-09 可选能力：媒体传输方式 UDP（基线）/ TCP（设备主动连接媒体端点）。
+    media_transport: str = Field(default="UDP", alias="mediaTransport")
 
 
 @router.post("/devices/{external_device_id}/playback")
@@ -382,16 +407,25 @@ def configure_playback(
     service: ProviderService = get_service(request)
     service.require_device(external_device_id)
     simulator.set_known_device(external_device_id)
-    view = simulator.configure_playback(
-        external_device_id,
-        mode=body.mode,
-        delay_seconds=body.delay_seconds,
-        reject_code=body.reject_code,
-        ack_timeout=body.ack_timeout_seconds,
-        media_mode=body.media_mode,
-        media_loss_rate=body.media_loss_rate,
-        media_stop_after_seconds=body.media_stop_after_seconds,
-    )
+    try:
+        view = simulator.configure_playback(
+            external_device_id,
+            mode=body.mode,
+            delay_seconds=body.delay_seconds,
+            reject_code=body.reject_code,
+            ack_timeout=body.ack_timeout_seconds,
+            media_mode=body.media_mode,
+            media_loss_rate=body.media_loss_rate,
+            media_stop_after_seconds=body.media_stop_after_seconds,
+            codec=body.codec,
+            has_audio=body.has_audio,
+            transport=body.transport,
+            media_transport=body.media_transport,
+        )
+    except SimulatorError as exc:
+        raise provider_error(
+            ErrorCode.VIDEO_INVALID_ARGUMENT, str(exc), {"externalDeviceId": external_device_id}
+        ) from exc
     return ok(get_request_id(request), view)
 
 

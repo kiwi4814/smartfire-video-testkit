@@ -14,6 +14,12 @@ from video_testkit.sip.registrar import LiveDialog, LiveInviteError
 class DeviceAddrSource(Protocol):
     def device_listener_addr(self, device_id: str) -> tuple[str, int] | None: ...
 
+    def device_tcp_addr(self, device_id: str) -> tuple[str, int] | None: ...
+
+    def device_transport(self, device_id: str) -> str: ...
+
+    def device_media_transport(self, device_id: str) -> str: ...
+
 
 class LiveRegistrar(Protocol):
     async def invite_device(
@@ -23,10 +29,16 @@ class LiveRegistrar(Protocol):
         timeout: float,
         sdp_media: tuple[str, int] | None = None,
         session_name: str = "Play",
+        transport: str = "UDP",
+        media_transport: str = "UDP",
     ) -> LiveDialog: ...
 
     async def send_bye(
-        self, dialog: LiveDialog, target: tuple[str, int], timeout: float
+        self,
+        dialog: LiveDialog,
+        target: tuple[str, int],
+        timeout: float,
+        transport: str | None = None,
     ) -> bool: ...
 
 
@@ -46,18 +58,33 @@ class LiveClient:
         sdp_media: tuple[str, int] | None = None,
         session_name: str = "Play",
     ) -> LiveDialog:
-        target = self._simulator.device_listener_addr(device_id)
+        transport = self._simulator.device_transport(device_id)
+        target = (
+            self._simulator.device_tcp_addr(device_id)
+            if transport == "TCP"
+            else self._simulator.device_listener_addr(device_id)
+        )
         if target is None:
             raise LiveInviteError(f"设备无监听地址: {device_id}")
         return await self._registrar.invite_device(
-            device_id, target, timeout, sdp_media=sdp_media, session_name=session_name
+            device_id,
+            target,
+            timeout,
+            sdp_media=sdp_media,
+            session_name=session_name,
+            transport=transport,
+            media_transport=self._simulator.device_media_transport(device_id),
         )
 
     async def teardown(self, device_id: str, dialog: LiveDialog, timeout: float) -> None:
-        target = self._simulator.device_listener_addr(device_id)
+        target = (
+            self._simulator.device_tcp_addr(device_id)
+            if dialog.transport == "TCP"
+            else self._simulator.device_listener_addr(device_id)
+        )
         if target is None:
             return
-        await self._registrar.send_bye(dialog, target, timeout)
+        await self._registrar.send_bye(dialog, target, timeout, transport=dialog.transport)
 
     def attach_dialog(self, stream_key: str, dialog: LiveDialog) -> None:
         self._dialogs[stream_key] = dialog

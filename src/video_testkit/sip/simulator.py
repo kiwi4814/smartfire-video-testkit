@@ -43,6 +43,9 @@ logger = logging.getLogger(__name__)
 
 USER_AGENT = "SmartFire-TestKit-GB-Simulator/0.1.0"
 
+# 响应回写通道（VT-09 SIP over TCP）：TCP 连接写回；None 表示 UDP 发送。
+ReplySink = Callable[[bytes], None] | None
+
 
 @dataclass
 class SimulatorDeviceState:
@@ -218,6 +221,14 @@ class LiveScenario:
     media_mode: str = "normal"
     media_loss_rate: float = 0.0
     media_stop_after_seconds: float = 0.0
+    # 设备侧推流 codec（VT-09 可选能力）：H264（基线）/ H265。
+    codec: str = "H264"
+    # 是否附带 G.711A 音频轨（VT-09 可选能力，独立于 codec 选择）。
+    has_audio: bool = False
+    # 信令传输方式（VT-09 可选能力）：UDP（基线）/ TCP（SIP over TCP）。
+    transport: str = "UDP"
+    # 媒体传输方式（VT-09 可选能力）：UDP（基线）/ TCP（设备主动连接媒体端点）。
+    media_transport: str = "UDP"
     revision: int = 0
     invites_received: int = 0
     last_error: str | None = None
@@ -307,6 +318,8 @@ class DeviceSimulator:
         self._drop_next: set[str] = set()
         # 设备常驻 UDP 监听（接收 Provider 的 Catalog 查询）。
         self._listeners: dict[str, _ListenerProtocol] = {}
+        # 设备常驻 TCP 监听（VT-09 可选能力：SIP over TCP 信令）。
+        self._tcp_servers: dict[str, asyncio.AbstractServer] = {}
         # 设备侧目录场景与响应统计。
         self._catalog_scenarios: dict[str, CatalogScenario] = {}
         self._catalog_cseq: dict[str, int] = {}
@@ -346,11 +359,14 @@ class DeviceSimulator:
         self._known_ids.clear()
 
     def close_listeners(self) -> None:
-        """关闭全部设备常驻监听（reset 与进程退出时释放 UDP socket）。"""
+        """关闭全部设备常驻监听（reset 与进程退出时释放 UDP/TCP socket）。"""
         for protocol in self._listeners.values():
             if protocol.transport is not None and not protocol.transport.is_closing():
                 protocol.transport.close()
         self._listeners.clear()
+        for server in self._tcp_servers.values():
+            server.close()
+        self._tcp_servers.clear()
 
     def start_maintenance(self) -> None:
         """启动注册维护循环：在 expiry 前自动刷新，避免注册过期。幂等。"""
@@ -412,9 +428,74 @@ class DeviceSimulator:
         self._listeners[device_id] = protocol
 
     async def ensure_all_listeners(self) -> None:
-        """为所有已知设备创建常驻监听（启动与 reset 后重建）。"""
+        """为所有已知设备创建常驻监听（启动与 reset 后重建）；含 TCP 信令监听。"""
         for device_id in sorted(self._known_ids):
             await self._ensure_listener(device_id)
+            await self._ensure_tcp_listener(device_id)
+
+    # ------------------------------------------------------------ TCP 监听（VT-09）
+
+    async def _ensure_tcp_listener(self, device_id: str) -> None:
+        """为该设备创建常驻 TCP 监听（幂等）；SIP over TCP 信令（VT-09 可选能力）。"""
+        if device_id in self._tcp_servers:
+            return
+        server = await asyncio.start_server(
+            lambda reader, writer: self._handle_tcp_connection(device_id, reader, writer),
+            "127.0.0.1",
+            0,
+        )
+        self._tcp_servers[device_id] = server
+
+    async def _handle_tcp_connection(
+        self, device_id: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        """处理设备 TCP 连接：按 Content-Length 分帧解析 SIP 消息并回显响应。
+
+        SIP over TCP 以 Content-Length 定界（RFC 3261），响应经同一连接写回。
+        """
+        peer = writer.get_extra_info("peername") or ("127.0.0.1", 0)
+        try:
+            while True:
+                head = await reader.readuntil(b"\r\n\r\n")
+                text = head.decode("utf-8", errors="replace")
+                content_length = 0
+                for line in text.split("\r\n"):
+                    name, _, value = line.partition(":")
+                    if name.strip().lower() == "content-length":
+                        try:
+                            content_length = int(value.strip())
+                        except ValueError:
+                            content_length = 0
+                        break
+                body = await reader.readexactly(content_length) if content_length > 0 else b""
+                data = head + body
+                addr = tuple(peer)
+                reply = lambda payload: self._safe_tcp_write(writer, payload)  # noqa: E731
+                await self._handle_listener_datagram(device_id, data, addr, reply=reply)
+                # 将已排队的响应真正写入 TCP 连接（reply 回调为同步写入）。
+                await writer.drain()
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError):
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                writer.close()
+
+    @staticmethod
+    def _safe_tcp_write(writer: asyncio.StreamWriter, payload: bytes) -> None:
+        """向 TCP 连接写回响应（sendto 的 TCP 等价物，失败静默）。"""
+        try:
+            writer.write(payload)
+        except Exception:  # noqa: BLE001  # 连接已关闭：静默
+            pass
+
+    def device_tcp_addr(self, device_id: str) -> tuple[str, int] | None:
+        """设备常驻 TCP 监听地址（SIP over TCP 信令目标）；无监听返回 None。"""
+        server = self._tcp_servers.get(device_id)
+        sockets = getattr(server, "sockets", None) if server is not None else None
+        if not sockets:
+            return None
+        sockname = sockets[0].getsockname()
+        return str(sockname[0]), int(sockname[1])
 
     def device_listener_addr(self, device_id: str) -> tuple[str, int] | None:
         """设备常驻监听地址（Provider 查询目标）；无监听返回 None。"""
@@ -474,27 +555,36 @@ class DeviceSimulator:
             "lastError": scenario.last_error,
         }
 
-    async def _handle_listener_datagram(self, device_id: str, data: bytes, addr: Any) -> None:
-        """处理设备收到的 UDP 报文：实时流信令（INVITE/ACK/BYE）、Catalog 或 RecordInfo 查询。"""
+    async def _handle_listener_datagram(
+        self,
+        device_id: str,
+        data: bytes,
+        addr: Any,
+        reply: ReplySink = None,
+    ) -> None:
+        """处理设备收到的 SIP 报文（UDP 或 TCP）：实时流信令（INVITE/ACK/BYE）、
+        Catalog 或 RecordInfo 查询。``reply`` 提供 TCP 回写通道，None 表示 UDP。"""
         try:
             msg = parse_message(data)
         except ValueError:
             return
         method = msg.method()
         if method == "INVITE":
-            await self._handle_invite(device_id, msg, addr)
+            await self._handle_invite(device_id, msg, addr, reply=reply)
             return
         if method == "ACK":
             self._handle_ack(device_id, msg)
             return
         if method == "BYE":
-            await self._handle_bye(device_id, msg, addr)
+            await self._handle_bye(device_id, msg, addr, reply=reply)
             return
-        if await self._handle_catalog_query(device_id, msg, addr):
+        if await self._handle_catalog_query(device_id, msg, addr, reply=reply):
             return
-        await self._handle_recordinfo_query(device_id, msg, addr)
+        await self._handle_recordinfo_query(device_id, msg, addr, reply=reply)
 
-    async def _handle_catalog_query(self, device_id: str, msg: SipMessage, addr: Any) -> bool:
+    async def _handle_catalog_query(
+        self, device_id: str, msg: SipMessage, addr: Any, reply: ReplySink = None
+    ) -> bool:
         """处理 Catalog 查询 MESSAGE；消费成功返回 True，非 Catalog 查询返回 False。"""
         scenario = self._catalog_scenarios.get(device_id)
         if scenario is None:
@@ -514,7 +604,7 @@ class DeviceSimulator:
             await asyncio.sleep(scenario.delay_seconds)
         try:
             for body, charset in self._catalog_responses(device_id, query.sn, scenario):
-                await self._send_manscdp_response(device_id, addr, body, charset)
+                await self._send_manscdp_response(device_id, addr, body, charset, reply=reply)
                 scenario.responses_sent += 1
             scenario.last_error = None
         except Exception as exc:  # noqa: BLE001  # 上报控制面而非中断监听
@@ -570,7 +660,9 @@ class DeviceSimulator:
             "lastError": scenario.last_error,
         }
 
-    async def _handle_recordinfo_query(self, device_id: str, msg: SipMessage, addr: Any) -> None:
+    async def _handle_recordinfo_query(
+        self, device_id: str, msg: SipMessage, addr: Any, reply: ReplySink = None
+    ) -> None:
         """处理 RecordInfo 查询 MESSAGE；非 RecordInfo 查询静默返回。"""
         scenario = self._recordinfo_scenarios.get(device_id)
         if scenario is None:
@@ -593,7 +685,7 @@ class DeviceSimulator:
             for body, charset in self._recordinfo_responses(
                 device_id, query.device_id, query.sn, query, scenario
             ):
-                await self._send_manscdp_response(device_id, addr, body, charset)
+                await self._send_manscdp_response(device_id, addr, body, charset, reply=reply)
                 scenario.responses_sent += 1
             scenario.last_error = None
         except Exception as exc:  # noqa: BLE001  # 上报控制面而非中断监听
@@ -710,7 +802,9 @@ class DeviceSimulator:
             self._live_scenarios[device_id] = live_scenario
         return live_scenario, False
 
-    async def _handle_invite(self, device_id: str, msg: SipMessage, addr: Any) -> None:
+    async def _handle_invite(
+        self, device_id: str, msg: SipMessage, addr: Any, reply: ReplySink = None
+    ) -> None:
         """设备作为 UAS 处理 INVITE：按场景应答 SDP/200、486 或保持静默。"""
         try:
             offer = parse_sdp(msg.body)
@@ -727,7 +821,12 @@ class DeviceSimulator:
             return  # 静默：Provider 侧 INVITE 超时
         if scenario.mode == "rejection":
             await self._send_invite_response(
-                device_id, msg, addr, status=scenario.reject_code, reason="Busy Here"
+                device_id,
+                msg,
+                addr,
+                status=scenario.reject_code,
+                reason="Busy Here",
+                reply=reply,
             )
             return
         if scenario.mode == "delayed" and scenario.delay_seconds > 0:
@@ -754,7 +853,13 @@ class DeviceSimulator:
         )
         scenario.dialogs[call_id] = dialog
         await self._send_invite_ok(
-            device_id, msg, addr, dialog, session_name="Playback" if is_playback else "Play"
+            device_id,
+            msg,
+            addr,
+            dialog,
+            session_name="Playback" if is_playback else "Play",
+            codec=scenario.codec,
+            reply=reply,
         )
         if scenario.mode == "no-ack":
             dialog.timeout_task = asyncio.create_task(
@@ -801,27 +906,44 @@ class DeviceSimulator:
     async def _media_loop(
         self, device_id: str, dialog: DialogState, scenario: LiveScenario
     ) -> None:
-        """向 offer SDP 媒体端点（ZLM）持续推流 H.264 PS-over-RTP。
+        """向 offer SDP 媒体端点（ZLM）持续推流 H.264/H.265 PS-over-RTP。
 
-        支持确定性媒体场景：wrong-ssrc（错误 SSRC）、lossy（预热后整帧丢包）、
-        stop-after（推流一段时间后自行停止）。
+        codec 由场景编排决定（VT-09）：H265 使用独立 fixture 与 PSM 声明，
+        不改变 H.264/UDP 基线。支持确定性媒体场景：wrong-ssrc（错误 SSRC）、
+        lossy（预热后整帧丢包）、stop-after（推流一段时间后自行停止）。
         """
         assert dialog.media_target is not None
-        from video_testkit.media.fixture import H264_FIXTURE_PATH, verify_fixture
-        from video_testkit.media.rtp_ps import PsRtpPacketizer
+        from video_testkit.media.fixture import (
+            G711A_FIXTURE_PATH,
+            H264_FIXTURE_PATH,
+            H265_FIXTURE_PATH,
+            verify_fixture,
+        )
+        from video_testkit.media.rtp_ps import Codec, PsRtpPacketizer
 
-        verify_fixture()
+        codec: Codec = "H265" if (scenario.codec or "H264") == "H265" else "H264"
+        fixture_path = H265_FIXTURE_PATH if codec == "H265" else H264_FIXTURE_PATH
+        verify_fixture(codec)
+        audio: bytes | None = None
+        if scenario.has_audio:
+            verify_fixture("G711A")
+            audio = G711A_FIXTURE_PATH.read_bytes()
         host, _, port = dialog.media_target.rpartition(":")
         target = (host, int(port))
         ssrc = int(dialog.ssrc or "0", 10) & 0xFFFFFFFF  # GB28181 y= 为 10 位十进制 SSRC
         if scenario.media_mode == "wrong-ssrc":
             ssrc ^= 0xFFFF0000  # 确定性错误 SSRC
         packetizer = PsRtpPacketizer(
-            H264_FIXTURE_PATH.read_bytes(),
+            fixture_path.read_bytes(),
             ssrc=ssrc,
             mtu=self._settings.gb_media_mtu,
             fps=self._settings.gb_media_fps,
+            codec=codec,
+            audio=audio,
         )
+        if (scenario.media_transport or "UDP").upper() == "TCP":
+            await self._media_loop_tcp(dialog, scenario, packetizer)
+            return
         interval = 1.0 / self._settings.gb_media_fps
         drop_every = (
             max(1, int(1.0 / scenario.media_loss_rate)) if scenario.media_loss_rate > 0 else 0
@@ -857,7 +979,59 @@ class DeviceSimulator:
         finally:
             dialog.media_active = False
 
-    async def _handle_bye(self, device_id: str, msg: SipMessage, addr: Any) -> None:
+    async def _media_loop_tcp(
+        self,
+        dialog: DialogState,
+        scenario: LiveScenario,
+        packetizer: Any,
+    ) -> None:
+        """RTP over TCP（VT-09 可选能力）：设备主动连接媒体端点并推流。
+
+        每个 RTP 包前加 GB28181 4 字节长度头（0x24 0x00 + 长度）；连接失败
+        有界重试后放弃（记录 last_error，不无限阻塞）。UDP 基线不受影响。
+        """
+        assert dialog.media_target is not None
+        from video_testkit.media.rtp_ps import frame_to_tcp
+
+        host, _, port = dialog.media_target.rpartition(":")
+        target = (host, int(port))
+        interval = 1.0 / self._settings.gb_media_fps
+        dialog.media_active = True
+        start = asyncio.get_running_loop().time()
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, int(port)), timeout=2.0
+            )
+        except (TimeoutError, OSError):
+            scenario.last_error = f"TCP 媒体连接失败: {target}"
+            dialog.media_active = False
+            return
+        try:
+            for frame in packetizer.frame_iterator():
+                if dialog.status != "ESTABLISHED":
+                    break
+                for packet in frame:
+                    writer.write(frame_to_tcp(packet))
+                    dialog.media_sent += 1
+                await writer.drain()
+                await asyncio.sleep(interval)
+                if (
+                    scenario.media_stop_after_seconds > 0
+                    and asyncio.get_running_loop().time() - start
+                    > scenario.media_stop_after_seconds
+                ):
+                    break  # 模拟设备中途停止推流
+        except (ConnectionError, OSError):
+            scenario.last_error = f"TCP 媒体连接中断: {target}"
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            dialog.media_active = False
+
+    async def _handle_bye(
+        self, device_id: str, msg: SipMessage, addr: Any, reply: ReplySink = None
+    ) -> None:
         """设备收到 BYE：Dialog 进入 TERMINATED 并回 200。"""
         call_id = msg.header("call-id")
         if call_id:
@@ -877,7 +1051,7 @@ class DeviceSimulator:
                     if dialog.media_task is not None and not dialog.media_task.done():
                         dialog.media_task.cancel()
                         dialog.media_task = None
-        await self._send_invite_response(device_id, msg, addr, status=200, reason="OK")
+        await self._send_invite_response(device_id, msg, addr, status=200, reason="OK", reply=reply)
 
     async def _ack_timeout(
         self, device_id: str, call_id: str, timeout: float, is_playback: bool = False
@@ -903,16 +1077,25 @@ class DeviceSimulator:
         addr: Any,
         dialog: DialogState,
         session_name: str = "Play",
+        codec: str = "H264",
+        reply: ReplySink = None,
     ) -> None:
         sdp = build_sdp_answer(
             "127.0.0.1",
             dialog.media_port or 0,
             dialog.ssrc or "",
-            "H264",
+            codec,
             session_name=session_name,
         )
         await self._send_invite_response(
-            device_id, msg, addr, status=200, reason="OK", to_tag=dialog.to_tag, body=sdp
+            device_id,
+            msg,
+            addr,
+            status=200,
+            reason="OK",
+            to_tag=dialog.to_tag,
+            body=sdp,
+            reply=reply,
         )
 
     async def _send_invite_response(
@@ -925,11 +1108,12 @@ class DeviceSimulator:
         reason: str,
         to_tag: str | None = None,
         body: str | None = None,
+        reply: ReplySink = None,
     ) -> None:
-        """回显 INVITE/BYE 的 Via/From/To/Call-ID/CSeq 并返回 SIP 响应。"""
-        protocol = self._listeners.get(device_id)
-        if protocol is None or protocol.transport is None:
-            return
+        """回显 INVITE/BYE 的 Via/From/To/Call-ID/CSeq 并返回 SIP 响应。
+
+        ``reply`` 提供 TCP 回写通道（VT-09）；None 时经 UDP 监听 socket 发送。
+        """
         to_tag = to_tag or _dialog_to_tag()
         headers: list[tuple[str, str]] = []
         for name in ("via", "from", "to", "call-id", "cseq"):
@@ -941,10 +1125,16 @@ class DeviceSimulator:
                 headers[i] = (name, f"{value};tag={to_tag}")
         if body is not None:
             headers.append(("Content-Type", "application/sdp"))
-        protocol.transport.sendto(
-            build_message(f"SIP/2.0 {status} {reason}", headers, body or "", body_encoding="utf-8"),
-            tuple(addr),
+        payload = build_message(
+            f"SIP/2.0 {status} {reason}", headers, body or "", body_encoding="utf-8"
         )
+        if reply is not None:
+            reply(payload)
+            return
+        protocol = self._listeners.get(device_id)
+        if protocol is None or protocol.transport is None:
+            return
+        protocol.transport.sendto(payload, tuple(addr))
 
     @staticmethod
     def _device_ssrc(device_id: str) -> str:
@@ -967,6 +1157,10 @@ class DeviceSimulator:
         media_mode: str = "normal",
         media_loss_rate: float = 0.0,
         media_stop_after_seconds: float = 0.0,
+        codec: str = "H264",
+        has_audio: bool = False,
+        transport: str = "UDP",
+        media_transport: str = "UDP",
     ) -> dict[str, Any]:
         """安排设备实时流应答与媒体场景；每次安排 revision 递增。"""
         self._require_known(device_id)
@@ -978,6 +1172,10 @@ class DeviceSimulator:
         scenario.media_mode = media_mode
         scenario.media_loss_rate = float(media_loss_rate)
         scenario.media_stop_after_seconds = float(media_stop_after_seconds)
+        scenario.codec = self._normalize_codec(codec)
+        scenario.has_audio = bool(has_audio)
+        scenario.transport = self._normalize_transport(transport)
+        scenario.media_transport = self._normalize_transport(media_transport)
         scenario.last_error = None
         scenario.revision += 1
         return self.live_status(device_id)
@@ -995,6 +1193,10 @@ class DeviceSimulator:
             "mediaMode": scenario.media_mode,
             "mediaLossRate": scenario.media_loss_rate,
             "mediaStopAfterSeconds": scenario.media_stop_after_seconds,
+            "codec": scenario.codec,
+            "hasAudio": scenario.has_audio,
+            "transport": scenario.transport,
+            "mediaTransport": scenario.media_transport,
             "revision": str(scenario.revision),
             "invitesReceived": scenario.invites_received,
             "lastError": scenario.last_error,
@@ -1014,6 +1216,10 @@ class DeviceSimulator:
         media_mode: str = "normal",
         media_loss_rate: float = 0.0,
         media_stop_after_seconds: float = 0.0,
+        codec: str = "H264",
+        has_audio: bool = False,
+        transport: str = "UDP",
+        media_transport: str = "UDP",
     ) -> dict[str, Any]:
         """安排设备回放流应答与媒体场景；每次安排 revision 递增。"""
         self._require_known(device_id)
@@ -1025,6 +1231,10 @@ class DeviceSimulator:
         scenario.media_mode = media_mode
         scenario.media_loss_rate = float(media_loss_rate)
         scenario.media_stop_after_seconds = float(media_stop_after_seconds)
+        scenario.codec = self._normalize_codec(codec)
+        scenario.has_audio = bool(has_audio)
+        scenario.transport = self._normalize_transport(transport)
+        scenario.media_transport = self._normalize_transport(media_transport)
         scenario.last_error = None
         scenario.revision += 1
         return self.playback_status(device_id)
@@ -1042,11 +1252,41 @@ class DeviceSimulator:
             "mediaMode": scenario.media_mode,
             "mediaLossRate": scenario.media_loss_rate,
             "mediaStopAfterSeconds": scenario.media_stop_after_seconds,
+            "codec": scenario.codec,
+            "hasAudio": scenario.has_audio,
+            "transport": scenario.transport,
+            "mediaTransport": scenario.media_transport,
             "revision": str(scenario.revision),
             "invitesReceived": scenario.invites_received,
             "lastError": scenario.last_error,
             "dialogs": [self._dialog_view(d) for d in scenario.dialogs.values()],
         }
+
+    @staticmethod
+    def _normalize_codec(codec: str) -> str:
+        """能力门控：只接受 H264/H265，其余值显式失败（不静默降级）。"""
+        normalized = codec.upper()
+        if normalized not in ("H264", "H265"):
+            raise SimulatorError(f"不支持的 codec: {codec!r}（支持 H264/H265）")
+        return normalized
+
+    @staticmethod
+    def _normalize_transport(transport: str) -> str:
+        """能力门控：只接受 UDP/TCP，其余值显式失败（不静默降级）。"""
+        normalized = transport.upper()
+        if normalized not in ("UDP", "TCP"):
+            raise SimulatorError(f"不支持的 transport: {transport!r}（支持 UDP/TCP）")
+        return normalized
+
+    def device_transport(self, device_id: str) -> str:
+        """设备当前实时流信令传输方式（Provider 侧选择发送路径）。"""
+        scenario = self._live_scenarios.get(device_id)
+        return scenario.transport if scenario is not None else "UDP"
+
+    def device_media_transport(self, device_id: str) -> str:
+        """设备当前实时流媒体传输方式（Provider 侧选择 ZLM tcp_mode）。"""
+        scenario = self._live_scenarios.get(device_id)
+        return scenario.media_transport if scenario is not None else "UDP"
 
     @staticmethod
     def _dialog_view(dialog: DialogState) -> dict[str, Any]:
@@ -1103,12 +1343,20 @@ class DeviceSimulator:
         target_addr: Any,
         body: str,
         charset: str,
+        reply: ReplySink = None,
     ) -> None:
-        """从设备常驻监听 socket 向查询方（Provider）发送 MANSCDP 响应 MESSAGE。"""
+        """从设备常驻监听 socket 向查询方（Provider）发送 MANSCDP 响应 MESSAGE。
+
+        ``reply`` 提供 TCP 回写通道（VT-09）；None 时经 UDP 监听 socket 发送。
+        """
         protocol = self._listeners.get(device_id)
-        if protocol is None or protocol.transport is None:
+        if protocol is None or protocol.transport is None and reply is None:
             raise SimulatorError(f"设备监听已关闭: {device_id}")
-        local_port = protocol.transport.get_extra_info("sockname")[1]
+        local_port = (
+            protocol.transport.get_extra_info("sockname")[1]
+            if protocol is not None and protocol.transport is not None
+            else self._tcp_port(device_id)
+        )
         uri = f"sip:{PROVIDER_SIP_ID}@{target_addr[0]}:{target_addr[1]}"
         branch = "z9hG4bK" + uuid.uuid4().hex[:20]
         self._catalog_cseq[device_id] = self._catalog_cseq.get(device_id, 0) + 1
@@ -1127,7 +1375,14 @@ class DeviceSimulator:
             body,
             body_encoding=charset,
         )
-        protocol.transport.sendto(msg, tuple(target_addr))
+        if reply is not None:
+            reply(msg)
+            return
+        protocol.transport.sendto(msg, tuple(target_addr))  # type: ignore[union-attr]
+
+    def _tcp_port(self, device_id: str) -> int:
+        addr = self.device_tcp_addr(device_id)
+        return addr[1] if addr else 0
 
     # ------------------------------------------------------------ Keepalive 控制
 

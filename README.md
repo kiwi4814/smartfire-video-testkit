@@ -37,9 +37,13 @@ SmartFire 视频测试套件：**Fake Video Provider** + **GB28181 Device Simula
 - 设备侧录像目录（RecordInfo）：响应 Provider 的 RecordInfo 查询 MESSAGE，按可编排场景返回录像 XML（normal/multi/duplicate/delayed/missing/out-of-order/timeout/empty，`POST/GET /devices/{id}/recordinfo`，支持 `timeOffsetSeconds` 控制设备本地时间偏移）
 - 设备侧实时流与回放流 UAS：INVITE(`s=Play`/`s=Playback`)/SDP/200/ACK/BYE Dialog 生命周期，按独立场景应答（`POST/GET /devices/{id}/live` 与 `POST/GET /devices/{id}/playback`）并通过 UDP 发送确定性 H.264 RTP/PS（normal/no-media/wrong-ssrc/lossy/stop-after）；Dialog、SSRC、媒体目标与发送统计经 `/testkit/v1` 脱敏诊断观察
 - 设备在线状态注入（`POST /devices/{id}/status`）、就绪状态注入（`POST /ready`）
+- **VT-09 可选能力包**（每项独立编排，H.264/UDP 基线不变；无效取值一律 400，不静默降级）：
+  - H.265：`codec: "H265"` 编排 H.265 fixture（libx265 合成，PSM `stream_type=0x24`）推流，SDP 以 `H265/90000` 协商
+  - 音频：`hasAudio: true` 在视频 PS 中附带 G.711A 音频 PES（`0xC0`，PSM `stream_type=0x90`），可与 H.264/H.265 组合
+  - SIP over TCP：`transport: "TCP"` 后 Provider 经真实 TCP（Content-Length 分帧）发送 INVITE/ACK/BYE
+  - RTP over TCP：`mediaTransport: "TCP"` 后设备主动连接媒体端点并以 GB28181 4 字节长度头推流（ZLM 侧 `tcp_mode=1`）
 
-**未实现（后续切片）**：H.265/TCP/音频媒体、
-Provider 事件回调的签名认证、多实例/持久化、OpenAPI 正式发布。
+**未实现（后续切片）**：Provider 事件回调的签名认证、多实例/持久化、OpenAPI 正式发布。
 
 ## 快速开始
 

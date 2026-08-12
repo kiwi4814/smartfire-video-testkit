@@ -23,6 +23,11 @@ class SdpData:
     session_name: str = "Play"
 
 
+def _rtpmap_for(codec: str) -> str:
+    """GB28181 可选能力（VT-09）：H.265 以 H265/90000 协商，H.264 保持基线。"""
+    return "H265/90000" if codec.upper() == "H265" else "H264/90000"
+
+
 def build_sdp_offer(
     media_ip: str, media_port: int, ssrc: str, codec: str, session_name: str = "Play"
 ) -> str:
@@ -37,7 +42,7 @@ def build_sdp_offer(
             f"m=video {media_port} RTP/AVP 96 98 97",
             "a=recvonly",
             "a=rtpmap:96 PS/90000",
-            "a=rtpmap:98 H264/90000",
+            f"a=rtpmap:98 {_rtpmap_for(codec)}",
             "a=rtpmap:97 MPEG4/90000",
             f"y={ssrc}",
             "",
@@ -59,7 +64,7 @@ def build_sdp_answer(
             f"m=video {media_port} RTP/AVP 96 98 97",
             "a=sendonly",
             "a=rtpmap:96 PS/90000",
-            "a=rtpmap:98 H264/90000",
+            f"a=rtpmap:98 {_rtpmap_for(codec)}",
             "a=rtpmap:97 MPEG4/90000",
             f"y={ssrc}",
             "",

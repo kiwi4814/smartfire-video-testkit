@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import secrets
 import uuid
@@ -53,6 +54,10 @@ class LiveDialog:
     ssrc: str | None = None
     media_port: int | None = None
     target: str | None = None
+    # VT-09 可选能力：信令传输方式（UDP 基线 / TCP）。
+    transport: str = "UDP"
+    # VT-09 可选能力：媒体传输方式（UDP 基线 / TCP）。
+    media_transport: str = "UDP"
 
 
 class LiveInviteError(Exception):
@@ -67,6 +72,31 @@ def _tag_of(value: str | None) -> str:
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+async def _read_sip_tcp_message(reader: asyncio.StreamReader, timeout: float) -> bytes | None:
+    """按 Content-Length 从 TCP 流读取一个完整 SIP 消息（有界超时）。"""
+    try:
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=timeout)
+    except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError):
+        return None
+    text = head.decode("utf-8", errors="replace")
+    content_length = 0
+    for line in text.split("\r\n"):
+        name, _, value = line.partition(":")
+        if name.strip().lower() == "content-length":
+            try:
+                content_length = int(value.strip())
+            except ValueError:
+                content_length = 0
+            break
+    body = b""
+    if content_length > 0:
+        try:
+            body = await asyncio.wait_for(reader.readexactly(content_length), timeout=timeout)
+        except (asyncio.IncompleteReadError, TimeoutError):
+            return None
+    return head + body
 
 
 class _RegistrarProtocol(asyncio.DatagramProtocol):
@@ -627,14 +657,27 @@ class SipRegistrar:
         timeout: float,
         sdp_media: tuple[str, int] | None = None,
         session_name: str = "Play",
+        transport: str = "UDP",
+        media_transport: str = "UDP",
     ) -> LiveDialog:
         """向设备发送 INVITE（SDP offer），2xx 后发 ACK 并返回 Dialog。
 
         4xx-6xx 抛 ``LiveInviteError``；无响应超时抛 ``TimeoutError``。
         ``sdp_media`` 覆盖 offer 中的媒体端点（ZLM RTP 接收地址）。
+        ``transport``：UDP（基线）或 TCP（VT-09 可选能力，Content-Length 分帧）。
+        ``media_transport``：媒体传输方式（Provider 侧选择 ZLM tcp_mode）。
         """
         if self._transport is None:
             raise LiveInviteError("Registrar 未启动")
+        if transport.upper() == "TCP":
+            return await self._invite_device_tcp(
+                device_id,
+                target,
+                timeout,
+                sdp_media=sdp_media,
+                session_name=session_name,
+                media_transport=media_transport,
+            )
         loop = asyncio.get_running_loop()
         self._uac_cseq += 1
         branch = "z9hG4bK" + uuid.uuid4().hex[:20]
@@ -667,14 +710,117 @@ class SipRegistrar:
             ssrc=ssrc,
             media_port=media_port,
             target=f"{target[0]}:{target[1]}",
+            transport="UDP",
+            media_transport=media_transport,
         )
         self._send_ack(device_id, target, call_id, from_tag, to_tag)
         return dialog
 
-    async def send_bye(self, dialog: LiveDialog, target: tuple[str, int], timeout: float) -> bool:
+    async def _invite_device_tcp(
+        self,
+        device_id: str,
+        target: tuple[str, int],
+        timeout: float,
+        sdp_media: tuple[str, int] | None = None,
+        session_name: str = "Play",
+        media_transport: str = "UDP",
+    ) -> LiveDialog:
+        """TCP 版 INVITE 事务：同一连接发 INVITE → 读 2xx → 发 ACK（VT-09）。"""
+        assert self._transport is not None, "Registrar 未启动"
+        self._uac_cseq += 1
+        branch = "z9hG4bK" + uuid.uuid4().hex[:20]
+        call_id = uuid.uuid4().hex
+        from_tag = uuid.uuid4().hex[:12]
+        ssrc = f"01000000{self._uac_cseq % 100:02d}"
+        media_ip = "127.0.0.1"
+        media_port = 30000 + (self._uac_cseq * 37) % 1000
+        if sdp_media is not None:
+            media_ip, media_port = sdp_media
+        body = build_sdp_offer(media_ip, media_port, ssrc, "H264", session_name=session_name)
+
+        host, port = target
+        uri = f"sip:{device_id}@{host}:{port}"
+        headers: list[tuple[str, str]] = [
+            (
+                "Via",
+                f"SIP/2.0/TCP {self._host}:{self._port};branch={branch};rport",
+            ),
+            (
+                "From",
+                f"<sip:{PROVIDER_SIP_ID}@{self._host}:{self._port}>;tag={from_tag}",
+            ),
+            ("To", f"<{uri}>"),
+            ("Call-ID", call_id),
+            ("CSeq", f"{self._uac_cseq} INVITE"),
+            ("Max-Forwards", "70"),
+            ("Content-Type", "application/sdp"),
+            ("User-Agent", "SmartFire-TestKit-Registrar/0.1.0"),
+        ]
+        request = build_message(f"INVITE {uri} SIP/2.0", headers, body)
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=timeout
+            )
+        except (TimeoutError, OSError) as exc:
+            raise TimeoutError(f"INVITE TCP 连接失败: {target}") from exc
+        try:
+            writer.write(request)
+            await asyncio.wait_for(writer.drain(), timeout=timeout)
+            raw = await _read_sip_tcp_message(reader, timeout)
+            if raw is None:
+                raise TimeoutError(f"INVITE TCP 响应超时: {target}")
+            resp = parse_message(raw)
+            status = resp.status_code() or 0
+            if not (200 <= status < 300):
+                raise LiveInviteError(f"INVITE 被设备拒绝: {status}")
+            to_tag = _tag_of(resp.header("to"))
+            dialog = LiveDialog(
+                call_id=call_id,
+                from_tag=from_tag,
+                to_tag=to_tag,
+                branch=branch,
+                device_id=device_id,
+                ssrc=ssrc,
+                media_port=media_port,
+                target=f"{target[0]}:{target[1]}",
+                transport="TCP",
+                media_transport=media_transport,
+            )
+            # ACK 走同一 TCP 连接（RFC 3261 事务连接语义）。
+            ack_headers: list[tuple[str, str]] = [
+                (
+                    "Via",
+                    f"SIP/2.0/TCP {self._host}:{self._port};branch={branch};rport",
+                ),
+                (
+                    "From",
+                    f"<sip:{PROVIDER_SIP_ID}@{self._host}:{self._port}>;tag={from_tag}",
+                ),
+                ("To", f"<{uri}>;tag={to_tag}"),
+                ("Call-ID", call_id),
+                ("CSeq", f"{self._uac_cseq} ACK"),
+                ("Max-Forwards", "70"),
+            ]
+            writer.write(build_message(f"ACK {uri} SIP/2.0", ack_headers))
+            await asyncio.wait_for(writer.drain(), timeout=timeout)
+            return dialog
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+    async def send_bye(
+        self,
+        dialog: LiveDialog,
+        target: tuple[str, int],
+        timeout: float,
+        transport: str | None = None,
+    ) -> bool:
         """向设备发送 BYE 并等待 200；超时返回 False（Provider 侧仍清理）。"""
         if self._transport is None:
             return False
+        if (transport or dialog.transport).upper() == "TCP":
+            return await self._send_bye_tcp(dialog, target, timeout)
         loop = asyncio.get_running_loop()
         self._uac_cseq += 1
         branch = "z9hG4bK" + uuid.uuid4().hex[:20]
@@ -688,6 +834,51 @@ class SipRegistrar:
             return False
         finally:
             self._uac_sessions.pop(branch, None)
+
+    async def _send_bye_tcp(
+        self, dialog: LiveDialog, target: tuple[str, int], timeout: float
+    ) -> bool:
+        """TCP 版 BYE 事务：同一连接发 BYE → 读 200（VT-09）。"""
+        assert self._transport is not None, "Registrar 未启动"
+        self._uac_cseq += 1
+        branch = "z9hG4bK" + uuid.uuid4().hex[:20]
+        host, port = target
+        uri = f"sip:{dialog.device_id}@{host}:{port}"
+        headers: list[tuple[str, str]] = [
+            (
+                "Via",
+                f"SIP/2.0/TCP {self._host}:{self._port};branch={branch};rport",
+            ),
+            (
+                "From",
+                f"<sip:{PROVIDER_SIP_ID}@{self._host}:{self._port}>;tag={dialog.from_tag}",
+            ),
+            ("To", f"<{uri}>;tag={dialog.to_tag}"),
+            ("Call-ID", dialog.call_id),
+            ("CSeq", f"{self._uac_cseq} BYE"),
+            ("Max-Forwards", "70"),
+        ]
+        request = build_message(f"BYE {uri} SIP/2.0", headers)
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=timeout
+            )
+        except (TimeoutError, OSError):
+            return False
+        try:
+            writer.write(request)
+            await asyncio.wait_for(writer.drain(), timeout=timeout)
+            raw = await _read_sip_tcp_message(reader, timeout)
+            if raw is None:
+                return False
+            status = parse_message(raw).status_code() or 0
+            return 200 <= status < 300
+        except (TimeoutError, ValueError):
+            return False
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
 
     def _dispatch_uac_response(self, msg: SipMessage) -> None:
         via = msg.header("via") or ""

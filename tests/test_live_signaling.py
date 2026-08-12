@@ -192,3 +192,210 @@ def test_live_reset_clears_dialogs_and_scenario(client: httpx.Client) -> None:
     stream = _start_live(client)
     _wait_dialog(client, lambda ds: any(d["status"] == "ESTABLISHED" for d in ds))
     assert stream["state"] == "STREAMING"
+
+
+# ---------------------------------------------------------------- H.265（VT-09）
+
+
+def test_sdp_h265_rtpmap() -> None:
+    """H.265 协商：rtpmap 声明 H265/90000；H.264 基线仍为 H264/90000。"""
+    answer = build_sdp_answer("127.0.0.1", 20000, "0100000002", "H265")
+    assert "a=rtpmap:98 H265/90000" in answer
+    offer = build_sdp_offer("127.0.0.1", 30000, "0100000001", "H265")
+    assert "a=rtpmap:98 H265/90000" in offer
+    parsed = parse_sdp(answer)
+    assert "H265" in parsed.codecs
+    # 基线不受影响
+    base = build_sdp_answer("127.0.0.1", 20000, "0100000002", "H264")
+    assert "a=rtpmap:98 H264/90000" in base
+    assert "H265/90000" not in base
+
+
+def test_live_h265_codec_configured_and_media_sent(client: httpx.Client) -> None:
+    """H.265 场景：codec 编排生效，真实 SIP Dialog 建立后设备推 H.265 媒体。"""
+    view = _configure(client, codec="H265")
+    assert view["codec"] == "H265"
+
+    stream = _start_live(client)
+    dialogs = _wait_dialog(
+        client, lambda ds: any(d["status"] == "ESTABLISHED" and d["ackReceived"] for d in ds)
+    )
+    assert dialogs
+    live = _device_live(client)
+    assert live["codec"] == "H265"
+
+    # 设备侧媒体循环使用 H.265 fixture 推流：mediaSent 递增可观察。
+    def media_sent() -> int:
+        established = [d for d in _device_live(client)["dialogs"] if d["status"] == "ESTABLISHED"]
+        return established[0]["mediaSent"] if established else 0
+
+    assert wait_until_value(media_sent, lambda n: n > 0, timeout=6.0) > 0
+
+    assert (
+        client.delete(f"/provider/v1/live-streams/{stream['providerStreamKey']}").status_code == 204
+    )
+    _wait_dialog(client, lambda ds: any(d["status"] == "TERMINATED" for d in ds))
+
+
+def test_live_unknown_codec_rejected(client: httpx.Client) -> None:
+    """不支持 codec 显式失败（400），不静默降级。"""
+    resp = client.post(f"/testkit/v1/devices/{NVR}/live", json={"codec": "MPEG4"})
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "VIDEO_INVALID_ARGUMENT"
+
+
+def test_playback_h265_codec_configured(client: httpx.Client) -> None:
+    """回放场景同样可编排 H.265 codec（独立能力，不捆绑）。"""
+    resp = client.post(
+        f"/testkit/v1/devices/{NVR}/playback",
+        json={"codec": "H265", "mediaMode": "none"},
+    )
+    view = data_of(resp, expected_status=200)
+    assert view["codec"] == "H265"
+    assert view["mediaMode"] == "none"
+
+
+def test_live_audio_scenario_configured_and_media_sent(client: httpx.Client) -> None:
+    """音频场景：hasAudio 编排生效，设备推流统计递增（H.264 + G.711A）。"""
+    view = _configure(client, codec="H264", hasAudio=True)
+    assert view["hasAudio"] is True
+
+    stream = _start_live(client)
+    _wait_dialog(
+        client, lambda ds: any(d["status"] == "ESTABLISHED" and d["ackReceived"] for d in ds)
+    )
+    live = _device_live(client)
+    assert live["hasAudio"] is True
+    assert live["codec"] == "H264"
+
+    def media_sent() -> int:
+        established = [d for d in _device_live(client)["dialogs"] if d["status"] == "ESTABLISHED"]
+        return established[0]["mediaSent"] if established else 0
+
+    assert wait_until_value(media_sent, lambda n: n > 0, timeout=6.0) > 0
+
+    assert (
+        client.delete(f"/provider/v1/live-streams/{stream['providerStreamKey']}").status_code == 204
+    )
+    _wait_dialog(client, lambda ds: any(d["status"] == "TERMINATED" for d in ds))
+
+
+def test_audio_h265_combination_independent_selection(client: httpx.Client) -> None:
+    """音频与 H.265 可独立选择：H.265 + 音频组合场景编排不捆绑。"""
+    view = _configure(client, codec="H265", hasAudio=True)
+    assert view["codec"] == "H265"
+    assert view["hasAudio"] is True
+
+    resp = client.post(
+        f"/testkit/v1/devices/{NVR}/playback",
+        json={"codec": "H264", "hasAudio": False},
+    )
+    view2 = data_of(resp, expected_status=200)
+    assert view2["codec"] == "H264"
+    assert view2["hasAudio"] is False
+
+
+# ---------------------------------------------------------------- SIP over TCP（VT-09）
+
+
+def test_live_tcp_scenario_rejects_unknown_transport(client: httpx.Client) -> None:
+    """不支持的 transport 显式失败（400），不静默降级。"""
+    resp = client.post(f"/testkit/v1/devices/{NVR}/live", json={"transport": "SCTP"})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "VIDEO_INVALID_ARGUMENT"
+
+
+def test_live_dialog_over_tcp_established_then_terminated(client: httpx.Client) -> None:
+    """SIP over TCP：真实 TCP 信令建立 Dialog，BYE 后 TERMINATED（VT-09）。"""
+    view = _configure(client, transport="TCP")
+    assert view["transport"] == "TCP"
+    # 设备 TCP 监听已就绪（Provider 侧经 TCP 发送 INVITE）。
+    live = _device_live(client)
+    assert live["transport"] == "TCP"
+
+    stream = _start_live(client)
+    dialogs = _wait_dialog(
+        client, lambda ds: any(d["status"] == "ESTABLISHED" and d["ackReceived"] for d in ds)
+    )
+    assert dialogs
+    established = next(d for d in dialogs if d["status"] == "ESTABLISHED")
+    assert established["target"]  # INVITE 来源（Provider 侧 TCP 端口）
+
+    assert (
+        client.delete(f"/provider/v1/live-streams/{stream['providerStreamKey']}").status_code == 204
+    )
+    _wait_dialog(client, lambda ds: any(d["status"] == "TERMINATED" for d in ds))
+
+
+def test_live_tcp_rejection_maps_to_failed(client: httpx.Client) -> None:
+    """TCP 信令下设备回 486：Provider stream 最终 FAILED。"""
+    _configure(client, mode="rejection", transport="TCP")
+    stream = _start_live(client)
+
+    def state() -> str:
+        return _stream_state(client, stream["providerStreamKey"])
+
+    assert wait_until_value(state, lambda s: s == "FAILED", timeout=6.0) == "FAILED"
+
+
+def test_live_tcp_drop_times_out(client: httpx.Client) -> None:
+    """TCP 信令下设备不响应：Provider INVITE 有界超时后 FAILED。"""
+    _configure(client, mode="drop", transport="TCP")
+    stream = _start_live(client)
+
+    def state() -> str:
+        return _stream_state(client, stream["providerStreamKey"])
+
+    assert wait_until_value(state, lambda s: s == "FAILED", timeout=6.0) == "FAILED"
+
+
+# ---------------------------------------------------------------- RTP over TCP（VT-09）
+
+
+def test_live_media_tcp_configured_and_failure_bounded(client: httpx.Client) -> None:
+    """mediaTransport=TCP：编排生效；无媒体端点时连接失败有界收敛（不无限阻塞）。"""
+    view = _configure(client, mediaTransport="TCP")
+    assert view["mediaTransport"] == "TCP"
+
+    stream = _start_live(client)
+    _wait_dialog(client, lambda ds: any(d["status"] == "ESTABLISHED" for d in ds))
+    live = _device_live(client)
+    assert live["mediaTransport"] == "TCP"
+
+    # 无 ZLM 时媒体端点是 Provider 侧预留端口（未监听）：设备 TCP 连接失败后
+    # mediaActive 恢复 False 且 lastError 可观察，Dialog 保持 ESTABLISHED。
+    def dialog_media() -> dict:
+        established = [d for d in _device_live(client)["dialogs"] if d["status"] == "ESTABLISHED"]
+        return established[0] if established else {}
+
+    wait_until_value(dialog_media, lambda d: d.get("mediaActive") is False, timeout=6.0)
+    # 清理路径正常
+    assert (
+        client.delete(f"/provider/v1/live-streams/{stream['providerStreamKey']}").status_code == 204
+    )
+    _wait_dialog(client, lambda ds: any(d["status"] == "TERMINATED" for d in ds))
+
+
+def test_live_unknown_media_transport_rejected(client: httpx.Client) -> None:
+    """不支持的 mediaTransport 显式失败（400），不静默降级。"""
+    resp = client.post(f"/testkit/v1/devices/{NVR}/live", json={"mediaTransport": "SCTP"})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "VIDEO_INVALID_ARGUMENT"
+
+
+def test_live_media_tcp_udp_baseline_unchanged(client: httpx.Client) -> None:
+    """默认 mediaTransport=UDP：编排视图与基线一致，未配置时行为不变。"""
+    view = _configure(client)
+    assert view["mediaTransport"] == "UDP"
+
+    stream = _start_live(client)
+    dialogs = _wait_dialog(
+        client, lambda ds: any(d["status"] == "ESTABLISHED" and d["ackReceived"] for d in ds)
+    )
+    assert dialogs
+    established = next(d for d in dialogs if d["status"] == "ESTABLISHED")
+    assert established["mediaSent"] >= 0  # UDP 媒体统计路径可用
+    assert (
+        client.delete(f"/provider/v1/live-streams/{stream['providerStreamKey']}").status_code == 204
+    )
