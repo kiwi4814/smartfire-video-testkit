@@ -7,6 +7,7 @@ HTTP 路由只负责参数/响应形态，所有确定性逻辑（分页、过�
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -59,6 +60,7 @@ from video_testkit.state import (
     Store,
     now_utc,
 )
+from video_testkit.zlm_client import ZlmClient, ZlmError
 
 BUILD_COMMIT = "dev"
 BUILD_TIME = datetime.now(UTC)
@@ -95,6 +97,8 @@ class ProviderService:
         self.catalog_client: CatalogClient | None = None
         # Provider 侧实时流信令客户端（app 装配注入；registrar 关闭时为 None）。
         self.live_client: LiveClient | None = None
+        # ZLMediaKit 集成客户端（app 装配注入；zlm_api_url 为空时为 None）。
+        self.zlm_client: ZlmClient | None = None
 
     # ------------------------------------------------------------ 资源查找
 
@@ -322,9 +326,12 @@ class ProviderService:
             external_device_id=device.external_device_id,
             external_channel_id=channel.external_channel_id,
             stream_profile=req.stream_profile,
-            state="STREAMING",
+            # ZLM 集成模式下由媒体到达驱动 STREAMING；未集成保持 mock 即时 STREAMING。
+            state="STARTING" if self.zlm_client is not None else "STREAMING",
             media={
-                "mediaServerId": "zlm-mock-01",
+                "mediaServerId": (
+                    "zlm-mock-01" if self.zlm_client is None else self.settings.zlm_media_server_id
+                ),
                 "vhost": "__defaultVhost__",
                 "app": "rtp",
                 "streamId": stream_id,
@@ -340,35 +347,68 @@ class ProviderService:
         self.store.live_streams[key] = stream
         self.store.set_active_live(device.external_device_id, channel.external_channel_id, key)
         entry.resource_ref = key
-        # 后台经真实 SIP INVITE/ACK 建立设备侧 Dialog；失败将 stream 收敛为 FAILED。
+        # 后台经真实 SIP INVITE/ACK 建立 Dialog；ZLM 模式下等待 stream-online 再 STREAMING。
         asyncio.get_running_loop().create_task(self._establish_live_stream(stream))
         return stream, True
 
     async def _establish_live_stream(self, stream: LiveStreamState) -> None:
-        """后台：向设备发起真实 INVITE，建立 Dialog 后挂到 stream；失败转 FAILED。"""
+        """后台：预留端口 → INVITE → 按协商 SSRC 开 RTP → 等 online → STREAMING。
+
+        失败路径收敛 FAILED 并在 finally 中强制关闭 ZLM RTP 端口（teardown）。
+        """
         client = self.live_client
+        zlm = self.zlm_client
         if client is None:
-            return  # registrar 关闭：保持 mock STREAMING（现状行为）
+            return  # registrar 关闭：保持 mock 行为
+        assert stream.media is not None
+        stream_id = str(stream.media["streamId"])
+        rtp_port: int | None = None
+        dialog: Any = None
         try:
+            if zlm is not None:
+                rtp_port = zlm.next_rtp_port()
             dialog = await client.establish(
                 stream.external_device_id,
                 timeout=self.settings.gb_live_invite_timeout,
+                sdp_media=(self.settings.zlm_rtp_host, rtp_port) if rtp_port else None,
             )
-        except (LiveInviteError, TimeoutError) as exc:
-            if stream.state == "STREAMING":
-                stream.state = "FAILED"
+            if zlm is not None:
+                await zlm.open_rtp_server(
+                    stream_id,
+                    port=rtp_port,
+                    ssrc=int(dialog.ssrc, 10) & 0xFFFFFFFF,
+                )
+                online = await zlm.wait_stream_online(
+                    stream_id, self.settings.zlm_stream_online_timeout
+                )
+                if not online:
+                    stream.state = "FAILED"
+                    logger.info(
+                        "live stream no media",
+                        extra={"providerStreamKey": stream.provider_stream_key},
+                    )
+                    return
+                stream.state = "STREAMING"
+        except (LiveInviteError, TimeoutError, ZlmError) as exc:
+            stream.state = "FAILED"
             logger.info(
                 "live stream establish failed",
                 extra={"providerStreamKey": stream.provider_stream_key, "reason": str(exc)},
             )
             return
+        finally:
+            if zlm is not None and rtp_port is not None and stream.state != "STREAMING":
+                await zlm.close_rtp_server(stream_id)
+
         if stream.state != "STREAMING":
             # start 后已被 stop：立即清理设备侧 Dialog，避免遗留。
-            await client.teardown(
-                stream.external_device_id, dialog, self.settings.gb_live_bye_timeout
-            )
+            if dialog is not None:
+                await client.teardown(
+                    stream.external_device_id, dialog, self.settings.gb_live_bye_timeout
+                )
             return
         client.attach_dialog(stream.provider_stream_key, dialog)
+        stream.state = "STREAMING"
 
     def get_live_stream(self, key: str) -> LiveStreamState:
         stream = self.store.live_streams.get(key)
@@ -398,9 +438,16 @@ class ProviderService:
 
     async def _teardown_live_stream(self, stream: LiveStreamState, dialog: Any) -> None:
         client = self.live_client
-        if client is None:
-            return
-        await client.teardown(stream.external_device_id, dialog, self.settings.gb_live_bye_timeout)
+        zlm = self.zlm_client
+        # 幂等关闭 ZLM RTP 端口与流，避免遗留 orphan stream。
+        if zlm is not None:
+            assert stream.media is not None
+            with contextlib.suppress(ZlmError):
+                await zlm.close_rtp_server(str(stream.media["streamId"]))
+        if client is not None:
+            await client.teardown(
+                stream.external_device_id, dialog, self.settings.gb_live_bye_timeout
+            )
 
     # ------------------------------------------------------------ 设备录像查询
 

@@ -26,6 +26,7 @@ from video_testkit.sip.registrar import SipRegistrar
 from video_testkit.sip.simulator import DeviceSimulator
 from video_testkit.state import Store
 from video_testkit.testkit_api import router as testkit_router
+from video_testkit.zlm_client import ZlmClient, ZlmError
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await registrar.start()  # 绑定失败即启动失败（fail fast）
         service.catalog_client = CatalogClient(registrar, simulator)
         service.live_client = LiveClient(registrar, simulator)
+
+    zlm_client: ZlmClient | None = None
+    if settings.zlm_api_url:
+        zlm_client = ZlmClient(
+            settings.zlm_api_url,
+            settings.zlm_api_secret,
+            settings.zlm_rtp_host,
+            settings.zlm_rtp_port_range,
+        )
+        await zlm_client.start()
+        service.zlm_client = zlm_client
 
     stop_event = asyncio.Event()
     worker = EventsDeliveryWorker(store, settings)
@@ -88,6 +100,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await timeout_task
         await simulator.stop_maintenance()
         simulator.close_listeners()
+        if zlm_client is not None:
+            for stream in tuple(store.live_streams.values()):
+                if stream.media is None:
+                    continue
+                with contextlib.suppress(ZlmError):
+                    await zlm_client.close_rtp_server(str(stream.media["streamId"]))
+        if zlm_client is not None:
+            await zlm_client.aclose()
         if registrar is not None:
             await registrar.stop()
 

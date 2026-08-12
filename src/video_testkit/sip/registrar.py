@@ -433,10 +433,12 @@ class SipRegistrar:
         device_id: str,
         target: tuple[str, int],
         timeout: float,
+        sdp_media: tuple[str, int] | None = None,
     ) -> LiveDialog:
         """向设备发送 INVITE（SDP offer），2xx 后发 ACK 并返回 Dialog。
 
         4xx-6xx 抛 ``LiveInviteError``；无响应超时抛 ``TimeoutError``。
+        ``sdp_media`` 覆盖 offer 中的媒体端点（ZLM RTP 接收地址）。
         """
         if self._transport is None:
             raise LiveInviteError("Registrar 未启动")
@@ -446,8 +448,11 @@ class SipRegistrar:
         call_id = uuid.uuid4().hex
         from_tag = uuid.uuid4().hex[:12]
         ssrc = f"01000000{self._uac_cseq % 100:02d}"
+        media_ip = "127.0.0.1"
         media_port = 30000 + (self._uac_cseq * 37) % 1000
-        body = build_sdp_offer("127.0.0.1", media_port, ssrc, "H264")
+        if sdp_media is not None:
+            media_ip, media_port = sdp_media
+        body = build_sdp_offer(media_ip, media_port, ssrc, "H264")
 
         future: asyncio.Future[tuple[int, SipMessage]] = loop.create_future()
         self._uac_sessions[branch] = _UacSession("INVITE", future)

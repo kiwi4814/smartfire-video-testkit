@@ -3,7 +3,7 @@
 SmartFire 视频测试套件：**Fake Video Provider** + **GB28181 Device Simulator** 的第一条纵向切片。
 
 共同契约见 `smartfire-repo/docs/project/SMARTFIRE-VIDEO-PROVIDER-CONTRACT-BASELINE.md`（`1.0.0-draft.1`）。
-本仓库不修改 `smartfire-repo`、`smartfire-device-simulator`、`smartfire-sipgo`，也不依赖 WVP / Gateway / ZLM。
+本仓库不修改 `smartfire-repo`、`smartfire-device-simulator`、`smartfire-sipgo`，也不依赖 WVP / Gateway；ZLM 仅用于显式启用的 VT-06 集成冒烟。
 
 项目开发入口：
 
@@ -21,7 +21,7 @@ SmartFire 视频测试套件：**Fake Video Provider** + **GB28181 Device Simula
 - `GET /health/live`、`GET /health/ready`、`GET /info`、`GET /capabilities`
 - `GET /devices`、`GET /devices/{id}`、`GET /devices/{id}/channels`、`GET /devices/{id}/status`（分页/过滤/稳定排序）
 - `POST /devices/{id}/catalog-syncs` + `GET /catalog-syncs/{operationId}`（异步操作机；通过真实 SIP Catalog 查询发现目录，SUCCEEDED/PARTIAL 含 discoveredCount，非破坏性 reconcile）
-- `POST/GET/DELETE /live-streams`（复用返回 200、新建返回 201、DELETE 幂等 204；启动即返回 STREAMING，后台经真实 SIP INVITE/ACK 建立 Dialog，rejection/timeout 收敛为 FAILED）
+- `POST/GET/DELETE /live-streams`（复用返回 200、新建返回 201、DELETE 幂等 204；未配置 ZLM 时保持 Fake Provider 即时 `STREAMING`，配置 ZLM 时先返回 `STARTING`，经真实 SIP INVITE/ACK 和 RTP/PS 到达 ZLM 后才收敛为 `STREAMING`）
 - `POST/GET /device-record-queries`（按小时确定性生成录像目录，`recordType` 仅支持 `ALL`/`TIME`）
 - `POST/GET/DELETE /playback-streams`（`recordKey` 优先，`VIDEO_RECORD_MISMATCH` 校验）
 - 统一 envelope `{requestId, data}` / `{requestId, error}`、稳定错误码、`Idempotency-Key`（缺失 400、复用冲突 409）
@@ -34,10 +34,10 @@ SmartFire 视频测试套件：**Fake Video Provider** + **GB28181 Device Simula
 - 有界超时；状态与最后错误可查（`GET /devices/{id}/status`）
 - 内置 Fake SIP Registrar（UDP）：请求日志与注册表可通过控制面查看；Provider 侧可向设备发起 Catalog 查询并聚合多消息响应
 - 设备常驻 UDP 监听：接收 Provider 的 Catalog 查询 MESSAGE，按可编排场景响应（normal/multi/duplicate/delayed/missing/malformed/out-of-order/timeout，`POST/GET /devices/{id}/catalog`）
-- 设备侧实时流 UAS：INVITE/SDP/200/ACK/BYE Dialog 生命周期，按场景应答（normal/rejection/delayed/no-ack/drop，`POST/GET /devices/{id}/live`）；Dialog/SSRC/目标地址经 `/testkit/v1` 脱敏诊断观察
+- 设备侧实时流 UAS：INVITE/SDP/200/ACK/BYE Dialog 生命周期，按场景应答并通过 UDP 发送确定性 H.264 RTP/PS（normal/no-media/wrong-ssrc/lossy/stop-after）；Dialog、SSRC、媒体目标与发送统计经 `/testkit/v1` 脱敏诊断观察
 - 设备在线状态注入（`POST /devices/{id}/status`）、就绪状态注入（`POST /ready`）
 
-**未实现（后续切片）**：RTP-PS 媒体流、设备真实 RecordInfo 查询、
+**未实现（后续切片）**：设备真实 RecordInfo 查询、H.265/TCP/音频媒体、
 Provider 事件回调的签名认证、多实例/持久化、OpenAPI 正式发布。
 
 ## 快速开始
@@ -75,6 +75,9 @@ video-testkit --port 8000
 | `GB_PASSWORD` / `GB_REALM` / `GB_EXPIRES` / `GB_REGISTER_TIMEOUT` | `12345678` / `3402000000` / `3600` / `3.0` | Digest 参数与有界超时 |
 | `EVENTS_CALLBACK_URL` / `EVENTS_MAX_ATTEMPTS` / `EVENTS_RETRY_BASE_DELAY` | 空 / `3` / `0.1` | 事件回调与重试 |
 | `MEDIA_BASE_URL` | `http://127.0.0.1:8080` | Fake 媒体引用基础地址 |
+| `ZLM_API_URL` / `ZLM_API_SECRET` | 空 / 空 | 留空关闭 ZLM 集成；配置后 live stream 需等待 ZLM stream-online |
+| `ZLM_RTP_HOST` / `ZLM_RTP_PORT_RANGE` / `ZLM_MEDIA_SERVER_ID` | `127.0.0.1` / `21001-21036` / `testkit-zlm-01` | ZLM RTP 接收地址、端口范围与媒体服务器标识 |
+| `GB_MEDIA_FPS` / `GB_MEDIA_MTU` | `25` / `1200` | 确定性 H.264 RTP/PS 帧率与 RTP payload 上限 |
 
 启动校验：地址格式、端口范围、注册目标自洽、token 长度；Registrar UDP 绑定失败即启动失败。
 
@@ -124,8 +127,8 @@ uv run pytest
 uv build
 ```
 
-## 后续工作（README 占位）
+## 后续工作
 
-- Catalog：SIP MESSAGE + Catalog 应答编解码、PARTIAL/FAILED 注入
-- RTP-PS：真实 RTP 打包 / 推流到 ZLM，`STREAMING` 的确认语义
 - RecordInfo：设备侧录像目录查询的 SIP 实现，替代内存确定性生成
+- Playback：复用 RTP/PS 媒体能力发送确定性设备录像
+- 可选媒体：TCP、H.265 和音频能力场景

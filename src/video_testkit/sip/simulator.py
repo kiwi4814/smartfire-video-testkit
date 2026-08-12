@@ -183,6 +183,12 @@ class DialogState:
     created_at: str = ""
     updated_at: str = ""
     timeout_task: asyncio.Task[None] | None = None
+    # 媒体推流运行态（VT-06）。
+    media_target: str | None = None  # offer SDP 中的媒体端点 "ip:port"（ZLM）
+    media_task: asyncio.Task[None] | None = None
+    media_active: bool = False
+    media_sent: int = 0
+    media_dropped: int = 0
 
 
 @dataclass
@@ -191,12 +197,17 @@ class LiveScenario:
 
     normal（立即 200 → 等 ACK）、rejection（回 4xx）、delayed（延迟 200）、
     no-ack（200 后收不到 ACK 则 Dialog FAILED）、drop（不响应 → Provider 超时）。
+    媒体模式 media_mode：normal（推流）、none（不推流）、wrong-ssrc（错误 SSRC）、
+    lossy（确定性丢包）、stop-after（推流一段时间后自行停止）。
     """
 
     mode: str = "normal"
     delay_seconds: float = 0.0
     reject_code: int = 486
     ack_timeout: float = 1.5
+    media_mode: str = "normal"
+    media_loss_rate: float = 0.0
+    media_stop_after_seconds: float = 0.0
     revision: int = 0
     invites_received: int = 0
     last_error: str | None = None
@@ -272,6 +283,12 @@ class DeviceSimulator:
         self.close_listeners()
         self._catalog_scenarios.clear()
         self._catalog_cseq.clear()
+        for scenario in self._live_scenarios.values():
+            for dialog in scenario.dialogs.values():
+                if dialog.timeout_task is not None:
+                    dialog.timeout_task.cancel()
+                if dialog.media_task is not None and not dialog.media_task.done():
+                    dialog.media_task.cancel()
         self._live_scenarios.clear()
         self._devices.clear()
         self._known_ids.clear()
@@ -455,7 +472,7 @@ class DeviceSimulator:
         if scenario.mode == "drop":
             return  # 静默：Provider 侧 INVITE 超时
         try:
-            parse_sdp(msg.body)
+            offer = parse_sdp(msg.body)
         except ValueError:
             scenario.last_error = "INVITE 缺少有效 SDP"
             return  # 无有效 offer：Provider 侧超时
@@ -470,15 +487,19 @@ class DeviceSimulator:
         call_id = msg.header("call-id") or uuid.uuid4().hex
         from_tag = msg.header("from") or ""
         to_tag = _dialog_to_tag()
+        media_target: str | None = None
+        if offer.media_ports:
+            media_target = f"{offer.connect_address}:{offer.media_ports[0]}"
         dialog = DialogState(
             call_id=call_id,
             from_tag=from_tag,
             to_tag=to_tag,
             device_id=device_id,
             status="WAITING_ACK",
-            ssrc=self._device_ssrc(device_id),
+            ssrc=offer.ssrc or self._device_ssrc(device_id),
             media_port=self._device_media_port(device_id),
             target=f"{addr[0]}:{addr[1]}",
+            media_target=media_target,
             created_at=utc_z_now(),
             updated_at=utc_z_now(),
         )
@@ -506,6 +527,71 @@ class DeviceSimulator:
         if dialog.timeout_task is not None:
             dialog.timeout_task.cancel()
             dialog.timeout_task = None
+        if (
+            dialog.media_target is not None
+            and dialog.media_task is None
+            and scenario.media_mode != "none"
+        ):
+            dialog.media_task = asyncio.create_task(self._media_loop(device_id, dialog, scenario))
+
+    async def _media_loop(
+        self, device_id: str, dialog: DialogState, scenario: LiveScenario
+    ) -> None:
+        """向 offer SDP 媒体端点（ZLM）持续推流 H.264 PS-over-RTP。
+
+        支持确定性媒体场景：wrong-ssrc（错误 SSRC）、lossy（预热后整帧丢包）、
+        stop-after（推流一段时间后自行停止）。
+        """
+        assert dialog.media_target is not None
+        from video_testkit.media.fixture import H264_FIXTURE_PATH, verify_fixture
+        from video_testkit.media.rtp_ps import PsRtpPacketizer
+
+        verify_fixture()
+        host, _, port = dialog.media_target.rpartition(":")
+        target = (host, int(port))
+        ssrc = int(dialog.ssrc or "0", 10) & 0xFFFFFFFF  # GB28181 y= 为 10 位十进制 SSRC
+        if scenario.media_mode == "wrong-ssrc":
+            ssrc ^= 0xFFFF0000  # 确定性错误 SSRC
+        packetizer = PsRtpPacketizer(
+            H264_FIXTURE_PATH.read_bytes(),
+            ssrc=ssrc,
+            mtu=self._settings.gb_media_mtu,
+            fps=self._settings.gb_media_fps,
+        )
+        interval = 1.0 / self._settings.gb_media_fps
+        drop_every = (
+            max(1, int(1.0 / scenario.media_loss_rate)) if scenario.media_loss_rate > 0 else 0
+        )
+        protocol = self._listeners.get(device_id)
+        if protocol is None or protocol.transport is None:
+            return
+        transport = protocol.transport
+        dialog.media_active = True
+        start = asyncio.get_running_loop().time()
+        try:
+            for frame_index, frame in enumerate(packetizer.frame_iterator()):
+                if dialog.status != "ESTABLISHED":
+                    break
+                preserve_frame = (
+                    frame_index < self._settings.gb_media_fps * 2
+                    or frame_index % self._settings.gb_media_fps == 0
+                )
+                drop_frame = not preserve_frame and drop_every > 0 and frame_index % drop_every == 0
+                for packet in frame:
+                    if drop_frame:
+                        dialog.media_dropped += 1
+                        continue
+                    transport.sendto(packet.encode(), target)
+                    dialog.media_sent += 1
+                await asyncio.sleep(interval)
+                if (
+                    scenario.media_stop_after_seconds > 0
+                    and asyncio.get_running_loop().time() - start
+                    > scenario.media_stop_after_seconds
+                ):
+                    break  # 模拟设备中途停止推流
+        finally:
+            dialog.media_active = False
 
     async def _handle_bye(self, device_id: str, msg: SipMessage, addr: Any) -> None:
         """设备收到 BYE：Dialog 进入 TERMINATED 并回 200。"""
@@ -522,6 +608,9 @@ class DeviceSimulator:
                 if dialog.timeout_task is not None:
                     dialog.timeout_task.cancel()
                     dialog.timeout_task = None
+                if dialog.media_task is not None and not dialog.media_task.done():
+                    dialog.media_task.cancel()
+                    dialog.media_task = None
         await self._send_invite_response(device_id, msg, addr, status=200, reason="OK")
 
     async def _ack_timeout(self, device_id: str, call_id: str, timeout: float) -> None:
@@ -592,14 +681,20 @@ class DeviceSimulator:
         delay_seconds: float = 0.0,
         reject_code: int = 486,
         ack_timeout: float = 1.5,
+        media_mode: str = "normal",
+        media_loss_rate: float = 0.0,
+        media_stop_after_seconds: float = 0.0,
     ) -> dict[str, Any]:
-        """安排设备实时流应答场景；每次安排 revision 递增。"""
+        """安排设备实时流应答与媒体场景；每次安排 revision 递增。"""
         self._require_known(device_id)
         scenario = self._live_scenarios[device_id]
         scenario.mode = mode
         scenario.delay_seconds = float(delay_seconds)
         scenario.reject_code = int(reject_code)
         scenario.ack_timeout = float(ack_timeout)
+        scenario.media_mode = media_mode
+        scenario.media_loss_rate = float(media_loss_rate)
+        scenario.media_stop_after_seconds = float(media_stop_after_seconds)
         scenario.last_error = None
         scenario.revision += 1
         return self.live_status(device_id)
@@ -614,6 +709,9 @@ class DeviceSimulator:
             "delaySeconds": scenario.delay_seconds,
             "rejectCode": scenario.reject_code,
             "ackTimeoutSeconds": scenario.ack_timeout,
+            "mediaMode": scenario.media_mode,
+            "mediaLossRate": scenario.media_loss_rate,
+            "mediaStopAfterSeconds": scenario.media_stop_after_seconds,
             "revision": str(scenario.revision),
             "invitesReceived": scenario.invites_received,
             "lastError": scenario.last_error,
@@ -632,6 +730,10 @@ class DeviceSimulator:
             "target": dialog.target,
             "ackReceived": dialog.ack_received,
             "byeReceived": dialog.bye_received,
+            "mediaTarget": dialog.media_target,
+            "mediaActive": dialog.media_active,
+            "mediaSent": dialog.media_sent,
+            "mediaDropped": dialog.media_dropped,
             "createdAt": dialog.created_at,
             "updatedAt": dialog.updated_at,
         }

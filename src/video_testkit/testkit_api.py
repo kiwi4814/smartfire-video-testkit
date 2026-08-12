@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any, cast
 
 from fastapi import APIRouter, BackgroundTasks, Request
@@ -17,6 +18,7 @@ from video_testkit.service import ProviderService
 from video_testkit.sip.registrar import SipRegistrar
 from video_testkit.sip.simulator import DeviceSimulator
 from video_testkit.state import Store
+from video_testkit.zlm_client import ZlmError
 
 router = APIRouter()
 
@@ -48,6 +50,10 @@ def get_registrar(request: Request) -> SipRegistrar | None:
 @router.post("/reset")
 async def reset(request: Request) -> dict[str, Any]:
     service = get_service(request)
+    store = get_store(request)
+    zlm_stream_ids = [
+        str(s.media["streamId"]) for s in store.live_streams.values() if s.media is not None
+    ]
     counts = service.reset()
     simulator = get_simulator(request)
     simulator.reset()
@@ -57,6 +63,12 @@ async def reset(request: Request) -> dict[str, Any]:
     registrar = get_registrar(request)
     if registrar is not None:
         registrar.reset()
+    # 强制关闭本场景遗留的 ZLM RTP 端口/流（幂等；重复 reset 不影响其他场景）。
+    zlm = service.zlm_client
+    if zlm is not None:
+        for stream_id in zlm_stream_ids:
+            with contextlib.suppress(ZlmError):
+                await zlm.close_rtp_server(stream_id)
     return ok(get_request_id(request), {"status": "RESET", **counts})
 
 
@@ -266,6 +278,9 @@ class LiveBody(BaseModel):
     delay_seconds: float = Field(default=0.0, ge=0, le=10)
     reject_code: int = Field(default=486, ge=400, le=699)
     ack_timeout_seconds: float = Field(default=1.5, gt=0, le=10, alias="ackTimeoutSeconds")
+    media_mode: str = Field(default="normal", alias="mediaMode")
+    media_loss_rate: float = Field(default=0.0, ge=0, lt=1, alias="mediaLossRate")
+    media_stop_after_seconds: float = Field(default=0.0, ge=0, le=60, alias="mediaStopAfterSeconds")
 
 
 @router.post("/devices/{external_device_id}/live")
@@ -285,6 +300,9 @@ def configure_live(
         delay_seconds=body.delay_seconds,
         reject_code=body.reject_code,
         ack_timeout=body.ack_timeout_seconds,
+        media_mode=body.media_mode,
+        media_loss_rate=body.media_loss_rate,
+        media_stop_after_seconds=body.media_stop_after_seconds,
     )
     return ok(get_request_id(request), view)
 

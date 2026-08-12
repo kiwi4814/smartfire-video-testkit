@@ -27,10 +27,12 @@
 - Catalog scenario controls via /testkit/v1 (single/multi-message pagination, duplicate, delayed, missing, malformed, out-of-order, timeout) with response progress counters and revision;
 - catalog-sync SUCCEEDED for complete catalogs (IPC 1 channel, NVR 4 channels with stable GB IDs), PARTIAL preserving valid items with deterministic discoveredCount for missing responses, FAILED for timeout/malformed;
 - repeated Catalog idempotent (no duplicate resources); non-destructive reconcile keeps previously discovered channels when a response omits items (missing channel reappears with the same Protocol Source Identity);
-- live-stream start returns STREAMING synchronously while a background real SIP INVITE establishes the device-side Dialog (SDP offer/answer, 200 OK, ACK → ESTABLISHED; BYE → TERMINATED);
-- device-side UAS signaling scenarios via /testkit/v1 (normal, rejection 486, delayed, no-ack, drop) with redacted Dialog diagnostics (call-id truncated, SSRC/media port/target observable only on the control interface);
+- live-stream start returns `STREAMING` synchronously when ZLM integration is disabled; when enabled, a new stream returns `STARTING`, establishes the device-side Dialog through real SIP INVITE/ACK, and only transitions to `STREAMING` after the expected ZLM `rtp/{streamId}` is online;
+- device-side UAS signaling scenarios via `/testkit/v1` (normal, rejection 486, delayed, no-ack, drop) with redacted Dialog diagnostics (call-id truncated, SSRC/media port/target observable only on the control interface);
+- deterministic redistribution-safe H.264 fixture (1280×720, 25 fps, 1 second, SHA-256 recorded), MPEG-2 PS muxing and RTP/UDP packetization with reproducible sequence/timestamp/marker/SSRC;
+- controlled ZLM integration smoke through real RTP packets: normal media, negotiated SSRC enforcement, no-media, wrong-SSRC, deterministic post-warmup frame loss, Stop cleanup and double-reset orphan cleanup;
 - rejection and INVITE timeout converge the Provider live stream to FAILED (stable, observable via GET); no-ack leaves the device Dialog in a stable FAILED state with ackReceived=false;
-- repeated DELETE on a live stream is idempotent 204 and tears down the device Dialog via BYE; failed scenarios and reset leave no Dialog, socket or port behind;
+- repeated DELETE on a live stream is idempotent 204 and tears down the device Dialog via BYE; failed scenarios, reset and process teardown leave no Dialog, socket, RTP port or ZLM stream behind;
 - machine-readable Provider Contract Bundle validation (version `1.0.0-draft.1`, SHA-256 integrity);
 - black-box Provider Conformance Runner (`video-testkit conformance` CLI subcommand) targeting arbitrary Base URL/token;
 - automated response envelope and payload Draft 2020-12 JSON Schema assertions against `openapi.yaml`;
@@ -49,18 +51,18 @@ uv run pytest
 uv build
 ```
 
-Current automated suite: 97 tests collected from thirteen behavior modules. Tests start real HTTP and UDP listeners on dynamically selected local ports, exercise the contract conformance runner, the registration lifecycle via UDP proxies, the Keepalive online/offline convergence via real SIP MESSAGE, Catalog discovery/pagination/partial/timeout scenarios via real SIP Catalog MESSAGE traffic, and live-stream signaling (INVITE/SDP/ACK/BYE Dialog lifecycle) over real SIP UDP.
+Current automated suite: 111 tests collected from fifteen behavior modules. Without ZLM configuration, 104 pass and the 7 controlled ZLM integration tests skip. With `VIDEO_TESTKIT_ZLM_API_URL` and `VIDEO_TESTKIT_ZLM_API_SECRET`, all 7 ZLM tests pass against real UDP RTP/PS transport. The suite also starts real HTTP and UDP listeners and exercises contract conformance, registration, Keepalive, Catalog, live signaling and media lifecycle behavior.
 
-GitHub Actions CI is green on push to `main` for Python 3.11/3.12/3.13 (run 31467232430, head `c5890e0`), covering lint, format, mypy, pytest and build. The preceding CI failure was a `tests/conftest.py` collection-time `ImportError` (`TypeVar` imported from `collections.abc`); fixed in `c5890e0` alongside Provider Contract alignment (camelCase aliases, idempotent stream stop).
+Local verification on 2026-08-12: required quality gates and build passed on Python 3.13 (`104 passed, 7 skipped`); the full test suite passed on Python 3.11 with the same count; the controlled ZLM smoke passed `7/7` on both Python 3.13 and 3.11.
 
 ## Interpretation
 
-This baseline proves Simulator Conformance for the implemented slice. It does not prove GB28181 certification, physical-camera interoperability, RTP/PS correctness, ZLMediaKit interoperability, H.264/H.265 playback or production performance.
+This baseline proves Simulator Conformance for deterministic UDP H.264 RTP/PS and the controlled ZLMediaKit environment. It does not prove GB28181 certification, physical-camera interoperability, H.265/audio/TCP media, device playback media or production performance.
 
 ## Unimplemented boundaries
 
 - TCP SIP transport;
-- RTP/PS media generation and ZLM observation (VT-06);
+- optional TCP/H.265/audio media scenarios;
 - device RecordInfo and playback media;
 - signed Provider event callbacks;
 - real-vendor compatibility matrix.

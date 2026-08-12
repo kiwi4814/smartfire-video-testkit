@@ -17,7 +17,11 @@ class DeviceAddrSource(Protocol):
 
 class LiveRegistrar(Protocol):
     async def invite_device(
-        self, device_id: str, target: tuple[str, int], timeout: float
+        self,
+        device_id: str,
+        target: tuple[str, int],
+        timeout: float,
+        sdp_media: tuple[str, int] | None = None,
     ) -> LiveDialog: ...
 
     async def send_bye(
@@ -34,11 +38,16 @@ class LiveClient:
         # providerStreamKey → 进行中的 Dialog（stream 停止或 reset 时清理）。
         self._dialogs: dict[str, LiveDialog] = {}
 
-    async def establish(self, device_id: str, timeout: float) -> LiveDialog:
+    async def establish(
+        self,
+        device_id: str,
+        timeout: float,
+        sdp_media: tuple[str, int] | None = None,
+    ) -> LiveDialog:
         target = self._simulator.device_listener_addr(device_id)
         if target is None:
             raise LiveInviteError(f"设备无监听地址: {device_id}")
-        return await self._registrar.invite_device(device_id, target, timeout)
+        return await self._registrar.invite_device(device_id, target, timeout, sdp_media=sdp_media)
 
     async def teardown(self, device_id: str, dialog: LiveDialog, timeout: float) -> None:
         target = self._simulator.device_listener_addr(device_id)

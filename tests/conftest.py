@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import time
@@ -167,4 +168,38 @@ def auth_server() -> Iterator[ServerHandle]:
 @pytest.fixture(scope="session")
 def auth_client(auth_server: ServerHandle) -> Iterator[httpx.Client]:
     with httpx.Client(base_url=auth_server.base_url, timeout=10.0) as c:
+        yield c
+
+
+# ---------------------------------------------------------------- ZLM 集成冒烟
+
+
+def zlm_settings(port: int) -> Settings:
+    """构造启用 ZLM 集成的 Settings（环境变量指向真实 ZLM）。"""
+    settings = _base_settings(port)
+    settings.zlm_api_url = os.environ.get("VIDEO_TESTKIT_ZLM_API_URL", "")
+    settings.zlm_api_secret = os.environ.get("VIDEO_TESTKIT_ZLM_API_SECRET", "")
+    settings.zlm_rtp_host = "127.0.0.1"
+    settings.zlm_rtp_port_range = (21001, 21036)
+    settings.zlm_stream_online_timeout = 5.0
+    return settings
+
+
+@pytest.fixture(scope="session")
+def zlm_server() -> Iterator[ServerHandle]:
+    """真实 ZLM 集成环境（未配置 VIDEO_TESTKIT_ZLM_API_URL 时整体 skip）。"""
+    api_url = os.environ.get("VIDEO_TESTKIT_ZLM_API_URL", "")
+    if not api_url:
+        pytest.skip("VIDEO_TESTKIT_ZLM_API_URL 未配置，跳过 ZLM 集成冒烟")
+    handle = ServerHandle(zlm_settings(free_port()))
+    handle.start()
+    try:
+        yield handle
+    finally:
+        handle.stop()
+
+
+@pytest.fixture(scope="session")
+def zlm_client(zlm_server: ServerHandle) -> Iterator[httpx.Client]:
+    with httpx.Client(base_url=zlm_server.base_url, timeout=10.0) as c:
         yield c

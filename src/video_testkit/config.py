@@ -60,6 +60,18 @@ class Settings(BaseSettings):
     # Provider 侧实时流信令：INVITE 等待最终响应、BYE 等待 200 的超时（秒）。
     gb_live_invite_timeout: float = Field(default=2.0, gt=0, le=30)
     gb_live_bye_timeout: float = Field(default=2.0, gt=0, le=30)
+    # 设备侧媒体推流参数（GB28181 RTP/PS）。
+    gb_media_fps: int = Field(default=25, ge=1, le=60)
+    gb_media_mtu: int = Field(default=1200, ge=500, le=1500)
+
+    # ---- ZLMediaKit 集成（VT-06；zlm_api_url 为空 = 未启用，保持 mock 行为）----
+    zlm_api_url: str = ""
+    zlm_api_secret: str = ""
+    zlm_rtp_host: str = "127.0.0.1"
+    zlm_rtp_port_range: tuple[int, int] = (21001, 21036)
+    zlm_media_server_id: str = "testkit-zlm-01"
+    # Provider 等待 ZLM stream-online 的有界超时（秒）。
+    zlm_stream_online_timeout: float = Field(default=5.0, gt=0, le=30)
 
     # ---- Provider 事件投递 ----
     events_callback_url: str | None = None
@@ -76,6 +88,13 @@ class Settings(BaseSettings):
             return value
         if not (value.startswith("http://") or value.startswith("https://")):
             raise ValueError("events_callback_url 必须以 http:// 或 https:// 开头")
+        return value
+
+    @field_validator("zlm_api_url")
+    @classmethod
+    def _validate_zlm_api_url(cls, value: str) -> str:
+        if value and not (value.startswith("http://") or value.startswith("https://")):
+            raise ValueError("zlm_api_url 必须以 http:// 或 https:// 开头")
         return value
 
     @property
