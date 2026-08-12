@@ -29,8 +29,8 @@
 - repeated Catalog idempotent (no duplicate resources); non-destructive reconcile keeps previously discovered channels when a response omits items (missing channel reappears with the same Protocol Source Identity);
 - live-stream start returns `STREAMING` synchronously when ZLM integration is disabled; when enabled, a new stream returns `STARTING`, establishes the device-side Dialog through real SIP INVITE/ACK, and only transitions to `STREAMING` after the expected ZLM `rtp/{streamId}` is online;
 - device-side UAS signaling scenarios via `/testkit/v1` (normal, rejection 486, delayed, no-ack, drop) with redacted Dialog diagnostics (call-id truncated, SSRC/media port/target observable only on the control interface);
-- deterministic redistribution-safe H.264 fixture (1280×720, 25 fps, 1 second, SHA-256 recorded), MPEG-2 PS muxing and RTP/UDP packetization with reproducible sequence/timestamp/marker/SSRC;
-- controlled ZLM integration smoke through real RTP packets: normal media, negotiated SSRC enforcement, no-media, wrong-SSRC, deterministic post-warmup frame loss, Stop cleanup and double-reset orphan cleanup;
+- deterministic redistribution-safe H.264 fixture (1280×720, 25 fps, 1 second, SHA-256 recorded), MPEG-2 PS muxing with an H.264 Program Stream Map (`stream_type=0x1B`, PES `0xE0`) and RTP/UDP packetization with reproducible sequence/timestamp/marker/SSRC;
+- controlled ZLM integration smoke through real RTP packets: normal media, negotiated SSRC enforcement, no-media, wrong-SSRC, deterministic post-warmup frame loss, Stop cleanup and double-reset orphan cleanup; ZLM identifies H.264 directly from the PSM without its malformed-PS codec-guess fallback;
 - rejection and INVITE timeout converge the Provider live stream to FAILED (stable, observable via GET); no-ack leaves the device Dialog in a stable FAILED state with ackReceived=false;
 - repeated DELETE on a live stream is idempotent 204 and tears down the device Dialog via BYE; failed scenarios, reset and process teardown leave no Dialog, socket, RTP port or ZLM stream behind;
 - machine-readable Provider Contract Bundle validation (version `1.0.0-draft.1`, SHA-256 integrity);
@@ -53,7 +53,7 @@ uv build
 
 Current automated suite: 111 tests collected from fifteen behavior modules. Without ZLM configuration, 104 pass and the 7 controlled ZLM integration tests skip. With `VIDEO_TESTKIT_ZLM_API_URL` and `VIDEO_TESTKIT_ZLM_API_SECRET`, all 7 ZLM tests pass against real UDP RTP/PS transport. The suite also starts real HTTP and UDP listeners and exercises contract conformance, registration, Keepalive, Catalog, live signaling and media lifecycle behavior.
 
-Local verification on 2026-08-12: required quality gates and build passed on Python 3.13 (`104 passed, 7 skipped`); the full test suite passed on Python 3.11 with the same count; the controlled ZLM smoke passed `7/7` on both Python 3.13 and 3.11.
+Local verification on 2026-08-12: required quality gates and build passed (`104 passed, 7 skipped`); with ZLM variables enabled the full suite passed `111/111`; the 7-test ZLM suite passed three consecutive runs (`7/7` each), with no `解析 ps 异常` or codec assertion in the captured ZLM logs. Python 3.11 compatibility remains covered by the preceding full-suite and ZLM runs.
 
 ## Interpretation
 

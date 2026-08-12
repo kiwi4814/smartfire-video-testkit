@@ -134,6 +134,9 @@ def _base_settings(port: int) -> Settings:
         gb_realm="3402000000",
         auth_token=None,
         events_callback_url=None,
+        # 普通 fixture 显式关闭 ZLM 集成，避免继承 VIDEO_TESTKIT_ZLM_API_URL 环境变量
+        # 导致 mock 行为被意外切换（仅 zlm_settings() 构造的专用 fixture 启用）。
+        zlm_api_url="",
     )
 
 

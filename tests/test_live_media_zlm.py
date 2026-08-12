@@ -155,7 +155,11 @@ def test_packet_loss_observable(zlm_client: httpx.Client) -> None:
         established = [d for d in dialogs if d["status"] == "ESTABLISHED"]
         return established[0] if established else {}
 
-    stats = wait_until_value(dialog_stats, lambda d: d.get("mediaSent", 0) > 10, timeout=6.0)
+    stats = wait_until_value(
+        dialog_stats,
+        lambda d: d.get("mediaSent", 0) > 10 and d.get("mediaDropped", 0) > 0,
+        timeout=6.0,
+    )
     assert stats["mediaDropped"] > 0  # 确定性丢包确实发生
 
 

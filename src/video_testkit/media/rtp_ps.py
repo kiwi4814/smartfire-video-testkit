@@ -16,6 +16,9 @@ CLOCK_RATE = 90_000
 # system header 声明 video stream 0xE0，ZLM 解析依赖该 codecid 登记）。
 _PS_PACK_HEADER = bytes.fromhex("000001ba4400040004018666cff8")
 _PS_SYSTEM_HEADER = bytes.fromhex("000001bb0009c333670021ffe0e0e6")
+# Program Stream Map：stream_type 0x1B 将 PES 0xE0 明确声明为 H.264。
+# CRC-32/MPEG-2 覆盖 start code 至 elementary stream map，完整 PSM 余数为 0。
+_PS_MAP = bytes.fromhex("000001bc000ee1ff000000041be00000744c1d22")
 _PES_VIDEO_START = b"\x00\x00\x01\xe0"
 _NAL_START = b"\x00\x00\x01"
 
@@ -150,7 +153,7 @@ class PsRtpPacketizer:
             + encode_pts(pts)
             + b"\x10\x60\xe6\xff"
         )
-        return _PS_PACK_HEADER + _PS_SYSTEM_HEADER + pes_header + payload
+        return _PS_PACK_HEADER + _PS_SYSTEM_HEADER + _PS_MAP + pes_header + payload
 
     def _packetize(self, ps: bytes, timestamp: int) -> list[RtpPacket]:
         packets: list[RtpPacket] = []

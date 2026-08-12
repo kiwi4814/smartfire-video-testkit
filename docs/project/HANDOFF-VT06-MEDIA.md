@@ -2,6 +2,7 @@
 
 > 交接时间：2026-08-12。由上一模型转交下一模型继续开发与测试。
 > 上一模型在 ZLM 媒体识别环节受阻（见 §5 调试记录），其余实现已完成并通过无 ZLM 依赖的全部测试。
+> **Resolved after handoff:** the remaining intermittent malformed-PS path was caused by a missing Program Stream Map. The final mux declares PES `0xE0` as H.264 (`stream_type=0x1B`) with a valid MPEG-2 CRC, so ZLM no longer relies on codec guessing. See the VT-06 local Issue and Verification Baseline for final evidence.
 
 ## 1. 交接状态概览
 

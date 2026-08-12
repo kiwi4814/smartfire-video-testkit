@@ -34,10 +34,12 @@ def test_ps_mux_contains_pack_and_pes_markers() -> None:
     frames = list(pkt.frames())
     assert len(frames) == 25  # 25 fps × 1s
     ps = b"".join(packet.payload for packet in frames[0])
-    # MPEG-2 pack header 固定 14 字节，随后是 System Header 和 E0 视频 PES。
+    # MPEG-2 pack/system header 后以 PSM 将 E0 明确映射为 H.264，再发送视频 PES。
     assert ps[:4] == b"\x00\x00\x01\xba"
     assert ps[14:18] == b"\x00\x00\x01\xbb"
-    assert ps[29:33] == b"\x00\x00\x01\xe0"
+    assert ps[29:33] == b"\x00\x00\x01\xbc"
+    assert ps[41:45] == b"\x1b\xe0\x00\x00"
+    assert ps[49:53] == b"\x00\x00\x01\xe0"
     # PES 内必须保留 Annex-B NAL 边界，ZLM 才能识别 SPS/H.264 track。
     assert b"\x00\x00\x00\x01\x67" in ps
 
