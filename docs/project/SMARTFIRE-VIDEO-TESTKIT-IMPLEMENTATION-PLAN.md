@@ -287,7 +287,7 @@ VT-02 Registration -> VT-03 Keepalive -> VT-04 Catalog -> VT-05 Live signaling -
 VT-06 -> VT-09 TCP/H265/Audio
 ```
 
-Provider Event callback and reconciliation is tracked locally as `VT-11`; it follows `VT-08` (and requires `CONTRACT-05`) so the mandatory TestKit path has exactly one frontier, and it is a mandatory blocker of `VT-10` release reporting.
+Provider Event callback and reconciliation is tracked locally as `VT-11` (**done**; requires `CONTRACT-05` which is complete): Callback Sink with scriptable 2xx/401/403/500 responses, Bearer-only delivery with bounded retry (no blind retry on auth errors), epoch-aware revisions, at-least-once deduplication and inventory `snapshotToken` reconciliation with 409-retryable expiry. The remaining mandatory TestKit path is `VT-10` release reporting, blocked by `VT-11` (now done) and the protocol slices — its only outstanding blocker is the event/inventory evidence linkage.
 
 CONTRACT-06 and its Bundle are complete. The cross-project frontier is VT-01; VT-02 and later slices follow their declared local blockers. WVP and Gateway work starts only after the mandatory TestKit release report VT-10 is done.
 

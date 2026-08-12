@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -114,6 +115,53 @@ class ProviderService:
         self.recordinfo_client: RecordInfoClient | None = None
         # ZLMediaKit 集成客户端（app 装配注入；zlm_api_url 为空时为 None）。
         self.zlm_client: ZlmClient | None = None
+        # VT-11：inventory 快照轮次（snapshotToken → 轮次指纹）。token 绑定
+        # inventory 内容指纹；目录变化后旧 token 视为过期（409 retryable）。
+        self._snapshot_rounds: dict[str, dict[str, Any]] = {}
+
+    # ------------------------------------------------------------ inventory 快照（VT-11）
+
+    def _inventory_fingerprint(self, device_id: str | None = None) -> str:
+        """目录内容指纹：设备（含通道）revision 摘要 + 全局变更序列。
+
+        绑定 ``event_seq``（任何设备/通道状态或事件变化都会递增）与逐项
+        revision，确保状态注入、Catalog 变更后旧 snapshotToken 过期。
+        """
+        digest = hashlib.sha256()
+        digest.update(str(self.store.event_seq).encode())
+        for device in sorted(self.store.devices.values(), key=lambda d: d.external_device_id):
+            if device_id is not None and device.external_device_id != device_id:
+                continue
+            digest.update(device.external_device_id.encode())
+            digest.update(str(device.revision).encode())
+            for channel in sorted(device.channels.values(), key=lambda c: c.external_channel_id):
+                digest.update(channel.external_channel_id.encode())
+                digest.update(str(channel.revision).encode())
+        return digest.hexdigest()
+
+    def begin_or_continue_snapshot(self, token: str | None, device_id: str | None = None) -> str:
+        """开启/延续 inventory 快照轮次并返回 token。
+
+        无 token = 开启新轮次（返回新 token）；带 token = 校验轮次仍有效且
+        目录指纹未变化，否则抛 409 VIDEO_CATALOG_SNAPSHOT_EXPIRED（retryable）。
+        """
+        fingerprint = self._inventory_fingerprint(device_id)
+        if not token:
+            new_token = uuid.uuid4().hex
+            self._snapshot_rounds[new_token] = {"fingerprint": fingerprint}
+            return new_token
+        round_state = self._snapshot_rounds.get(token)
+        if round_state is None or round_state["fingerprint"] != fingerprint:
+            raise provider_error(
+                ErrorCode.VIDEO_CATALOG_SNAPSHOT_EXPIRED,
+                "Inventory snapshot expired",
+                {"snapshotToken": token},
+            )
+        return token
+
+    def clear_snapshots(self) -> None:
+        """reset 或目录重建时清理全部快照轮次。"""
+        self._snapshot_rounds.clear()
 
     # ------------------------------------------------------------ 资源查找
 
@@ -766,6 +814,7 @@ class ProviderService:
         s.ready_override = None
         s.event_seq = 0
         self.idempotency.clear()
+        self.clear_snapshots()
         if self.live_client is not None:
             self.live_client.reset()
         seed_scenario(s)
@@ -897,26 +946,40 @@ class ProviderService:
             protocolStack="MOCK+SIP",
             recordTypesSupported=list(SUPPORTED_RECORD_TYPES),
             authEnabled=self.settings.auth_enabled,
+            providerEpoch=self.settings.provider_epoch,
         )
 
     def device_page_view(
-        self, items: list[DeviceState], page: int, page_size: int, total: int
+        self,
+        items: list[DeviceState],
+        page: int,
+        page_size: int,
+        total: int,
+        snapshot_token: str = "",
     ) -> DevicePage:
         return DevicePage(
             items=[self.device_view(d) for d in items],
             page=page,
             pageSize=page_size,
             total=total,
+            snapshotToken=snapshot_token,
         )
 
     def channel_page_view(
-        self, device: DeviceState, items: list[ChannelState], page: int, page_size: int, total: int
+        self,
+        device: DeviceState,
+        items: list[ChannelState],
+        page: int,
+        page_size: int,
+        total: int,
+        snapshot_token: str = "",
     ) -> ChannelPage:
         return ChannelPage(
             items=[self.channel_view(device, c) for c in items],
             page=page,
             pageSize=page_size,
             total=total,
+            snapshotToken=snapshot_token,
         )
 
     def catalog_accepted_view(self, op: CatalogOperation) -> CatalogSyncAccepted:

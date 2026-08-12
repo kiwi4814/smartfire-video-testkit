@@ -42,6 +42,10 @@ SmartFire 视频测试套件：**Fake Video Provider** + **GB28181 Device Simula
   - 音频：`hasAudio: true` 在视频 PS 中附带 G.711A 音频 PES（`0xC0`，PSM `stream_type=0x90`），可与 H.264/H.265 组合
   - SIP over TCP：`transport: "TCP"` 后 Provider 经真实 TCP（Content-Length 分帧）发送 INVITE/ACK/BYE
   - RTP over TCP：`mediaTransport: "TCP"` 后设备主动连接媒体端点并以 GB28181 4 字节长度头推流（ZLM 侧 `tcp_mode=1`）
+- **Provider 事件投递与对账（VT-11）**：
+  - 进程级 `providerEpoch`（UUID）经 `/info` 与事件 payload 暴露；事件回调独立 Bearer token（不进入 payload/日志），`401/403` 不盲目重试、`5xx` 有界退避重试并复用同一 `eventId`
+  - Callback Sink（`/testkit/v1/events/sink/*`）：运行态配置投递 URL/token、脚本化 2xx/401/403/500/延迟响应、按 `providerInstanceCode + eventId` 幂等去重、同 epoch/resource 内 revision 乱序可观察、reset 全量清理
+  - inventory 对账：`/provider/v1/devices` 与通道分页返回 `snapshotToken`（绑定目录指纹），续页回传同一 token，目录变化/未知 token → `409 VIDEO_CATALOG_SNAPSHOT_EXPIRED`（retryable，整轮重启）；漏事件后全量快照对账以 Provider 目录为事实源收敛
 
 **未实现（后续切片）**：Provider 事件回调的签名认证、多实例/持久化、OpenAPI 正式发布。
 

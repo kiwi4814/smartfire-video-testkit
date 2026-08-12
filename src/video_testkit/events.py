@@ -52,11 +52,26 @@ def record_event(
 
 
 class EventsDeliveryWorker:
-    """后台投递 worker：读取 outbox 中未送达事件并带退避重试。"""
+    """后台投递 worker：读取 outbox 中未送达事件并带退避重试。
 
-    def __init__(self, store: Store, settings: Settings) -> None:
+    ``dynamic_config`` 为 app.state 时，回调 URL 与 token 可经控制面
+    （/testkit/v1/events/sink/config）运行态切换；否则使用 settings 静态值。
+    """
+
+    def __init__(self, store: Store, settings: Settings, dynamic_config: Any | None = None) -> None:
         self._store = store
         self._settings = settings
+        self._dynamic = dynamic_config
+
+    def _callback_url(self) -> str | None:
+        if self._dynamic is not None and getattr(self._dynamic, "events_callback_url", None):
+            return str(self._dynamic.events_callback_url)
+        return self._settings.events_callback_url
+
+    def _callback_token(self) -> str:
+        if self._dynamic is not None and getattr(self._dynamic, "events_callback_token", None):
+            return str(self._dynamic.events_callback_token)
+        return self._settings.events_callback_token
 
     async def run(self, stop_event: asyncio.Event) -> None:
         timeout = httpx.Timeout(connect=2.0, read=2.0, write=2.0, pool=2.0)
@@ -69,7 +84,9 @@ class EventsDeliveryWorker:
                     pass
 
     async def _deliver_pending(self, client: httpx.AsyncClient) -> None:
-        url = self._settings.events_callback_url
+        url = self._callback_url()
+        token = self._callback_token()
+        auth_headers = {"Authorization": f"Bearer {token}"} if token else {}
         for event in self._store.events:
             if event.delivery_state == "DELIVERED":
                 continue
@@ -88,6 +105,7 @@ class EventsDeliveryWorker:
                 "eventType": event.event_type,
                 "providerType": self._settings.provider_type,
                 "providerInstanceCode": self._settings.provider_instance_code,
+                "providerEpoch": self._settings.provider_epoch,
                 "occurredAt": event.occurred_at.isoformat(timespec="milliseconds").replace(
                     "+00:00", "Z"
                 ),
@@ -102,15 +120,19 @@ class EventsDeliveryWorker:
             event.delivery_state = "FAILED"
             event.last_error = None
             try:
-                resp = await client.post(url, json=payload)
+                resp = await client.post(url, json=payload, headers=auth_headers)
                 if 200 <= resp.status_code < 300:
                     event.delivery_state = "DELIVERED"
+                elif resp.status_code in (401, 403):
+                    # 认证/授权失败不重试（配置错误，稳定可观察）。
+                    event.last_error = f"http {resp.status_code} (no retry)"
                 else:
                     event.last_error = f"http {resp.status_code}"
             except httpx.HTTPError as exc:
                 event.last_error = type(exc).__name__
             if (
                 event.delivery_state == "FAILED"
+                and "(no retry)" not in (event.last_error or "")
                 and event.attempts < self._settings.events_max_attempts
             ):
                 delay = self._settings.events_retry_base_delay * (2 ** (event.attempts - 1))

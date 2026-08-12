@@ -46,6 +46,12 @@
   - SIP over TCP signaling: device persistent TCP listener with Content-Length framing, Provider UAC INVITE/ACK/BYE transactions over the same TCP connection, scene control `transport: "TCP"`; Dialog established/terminated, rejection→FAILED and drop→timeout FAILED all verified over real TCP packets; UDP signaling baseline unchanged;
   - RTP over TCP media: GB28181 4-byte framing (`0x24 0x00` + big-endian length) per RTP packet, device connects to the media endpoint (`mediaTransport: "TCP"`), bounded failure convergence when no endpoint listens, ZLM `openRtpServer` `tcp_mode=1` wiring when media transport is TCP; unknown media transport fails explicitly with 400;
   - capability declaration stays within the fixed 14-item `CapabilityCode` enum (contract authority); the supported codec/audio/transport sets are declared via the contract-permitted `constraints` object on `LIVE_STREAM` and `DEVICE_RECORD_PLAYBACK` (`codecs`, `audioCodecs`, `signalingTransports`, `mediaTransports`), keeping declarations consistent with actually executable scenarios;
+- VT-11 Provider event delivery and inventory reconciliation:
+  - `providerEpoch` (UUID) generated per process start, exposed on `/info` and carried in every event payload (contract `x-required-from-contract`);
+  - event delivery uses an independent `Authorization: Bearer <token>` (token never enters payload/logs); `401/403` responses are not blindly retried (stable observable `no retry` marker), `5xx`/connection failures use bounded exponential backoff reusing the same `eventId`, and retries are bounded by `events_max_attempts`;
+  - Callback Sink (`/testkit/v1/events/sink/*` control surface + real `/sink/provider-events` HTTP endpoint): dynamically configured URL/token at runtime, scriptable responses (2xx/401/403/500/delay) via `/events/sink/script`, at-least-once deduplication by `providerInstanceCode + eventId`, revision-order observability within the same epoch + resource (late stale events flagged `_outOfOrder`, duplicates flagged `_duplicate`), and full reset cleanup of received events/scripts;
+  - inventory reconciliation: `/devices` and `/devices/{id}/channels` return a `snapshotToken` (contract-required) that binds the current catalog fingerprint (global change sequence + per-device/channel revisions); continuing pages echo the same token, unknown/stale tokens after catalog changes or reset return `409 VIDEO_CATALOG_SNAPSHOT_EXPIRED` (retryable, whole round must restart), device-level and channel-level rounds are independent;
+  - dropped-event scenario (CT-EVT-005): with the sink scripted 500, new events stay FAILED in the outbox (never falsely marked delivered), and a full inventory snapshot round still converges on the Provider directory as source of truth without MISSING conclusions;
 - machine-readable Provider Contract Bundle validation (version `1.0.0-draft.1`, SHA-256 integrity);
 - black-box Provider Conformance Runner (`video-testkit conformance` CLI subcommand) targeting arbitrary Base URL/token;
 - automated response envelope and payload Draft 2020-12 JSON Schema assertions against `openapi.yaml`;
@@ -64,16 +70,16 @@ uv run pytest
 uv build
 ```
 
-Current automated suite: 157 tests collected from behavior modules. Without ZLM configuration, 157 pass and the 12 controlled ZLM integration tests skip. With `VIDEO_TESTKIT_ZLM_API_URL` and `VIDEO_TESTKIT_ZLM_API_SECRET`, all 12 ZLM tests pass against real UDP RTP/PS transport (TCP-media ZLM smoke additionally requires a ZLM configured with TCP passive mode). The suite also starts real HTTP, UDP and TCP listeners and exercises contract conformance, registration, Keepalive, Catalog, RecordInfo, live/playback signaling and media lifecycle behavior, including the VT-09 H.265/audio/TCP optional scenarios.
+Current automated suite: 171 tests collected from behavior modules. Without ZLM configuration, 171 pass and the 12 controlled ZLM integration tests skip. With `VIDEO_TESTKIT_ZLM_API_URL` and `VIDEO_TESTKIT_ZLM_API_SECRET`, all 12 ZLM tests pass against real UDP RTP/PS transport (TCP-media ZLM smoke additionally requires a ZLM configured with TCP passive mode). The suite also starts real HTTP, UDP and TCP listeners and exercises contract conformance, registration, Keepalive, Catalog, RecordInfo, live/playback signaling, media lifecycle, Provider event callback delivery and inventory reconciliation behavior.
 
-Local verification on 2026-08-12: required quality gates and build passed (`157 passed, 12 skipped`); with ZLM variables enabled the full suite passed `169/169`.
+Local verification on 2026-08-12: required quality gates and build passed (`171 passed, 12 skipped`); with ZLM variables enabled the full suite passed `183/183`.
 
 ## Interpretation
 
-This baseline proves Simulator Conformance for deterministic UDP H.264 RTP/PS, deterministic device RecordInfo over real SIP MESSAGE, deterministic device playback media over SIP/RTP/PS, the VT-09 optional capability pack (H.265, G.711A audio, SIP over TCP, RTP over TCP) and the controlled ZLMediaKit environment. It does not prove GB28181 certification, physical-camera interoperability, real-vendor compatibility or production performance.
+This baseline proves Simulator Conformance for deterministic UDP H.264 RTP/PS, deterministic device RecordInfo over real SIP MESSAGE, deterministic device playback media over SIP/RTP/PS, the VT-09 optional capability pack (H.265, G.711A audio, SIP over TCP, RTP over TCP), Provider event delivery through the callback sink with epoch-aware revisions and bounded retry semantics, inventory snapshotToken reconciliation, and the controlled ZLMediaKit environment. It does not prove GB28181 certification, physical-camera interoperability, real-vendor compatibility or production performance.
 
 ## Unimplemented boundaries
 
-- signed Provider event callbacks;
+- signed Provider event callbacks (Bearer-only v1 callbacks are validated; cryptographic signature verification is not part of the contract);
 - real-vendor compatibility matrix;
 - H.265/audio/TCP-media arrival verified against a real ZLMediaKit TCP passive-mode receiver (UDP arrival is proven in the baseline; TCP-media smoke is available on request with the matching ZLM configuration).

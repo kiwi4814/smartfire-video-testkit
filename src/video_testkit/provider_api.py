@@ -108,11 +108,16 @@ def list_devices(
     query: str | None = Query(None, max_length=256),
     online_status: str | None = Query(None, alias="onlineStatus"),
     updated_after: str | None = Query(None, alias="updatedAfter"),
+    snapshot_token: str | None = Query(None, alias="snapshotToken"),
 ) -> dict[str, Any]:
     _validate_online_status(online_status)
     service = get_service(request)
+    token = service.begin_or_continue_snapshot(snapshot_token)
     items, total = service.list_devices(page, page_size, query, online_status, updated_after)
-    return ok(get_request_id(request), service.device_page_view(items, page, page_size, total))
+    return ok(
+        get_request_id(request),
+        service.device_page_view(items, page, page_size, total, snapshot_token=token),
+    )
 
 
 @router.get("/devices/{external_device_id}")
@@ -130,12 +135,14 @@ def list_channels(
     page_size: int = Query(100, ge=1, le=500, alias="pageSize"),
     query: str | None = Query(None, max_length=256),
     online_status: str | None = Query(None, alias="onlineStatus"),
+    snapshot_token: str | None = Query(None, alias="snapshotToken"),
 ) -> dict[str, Any]:
     _validate_online_status(online_status)
     service = get_service(request)
     device = service.require_device(external_device_id)
+    token = service.begin_or_continue_snapshot(snapshot_token, device_id=external_device_id)
     items, total = service.list_channels(external_device_id, page, page_size, query, online_status)
-    view = service.channel_page_view(device, items, page, page_size, total)
+    view = service.channel_page_view(device, items, page, page_size, total, snapshot_token=token)
     return ok(get_request_id(request), view)
 
 

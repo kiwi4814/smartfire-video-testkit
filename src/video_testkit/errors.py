@@ -32,6 +32,8 @@ class ErrorCode(StrEnum):
     VIDEO_RECORD_MISMATCH = "VIDEO_RECORD_MISMATCH"
     VIDEO_PLAYBACK_START_FAILED = "VIDEO_PLAYBACK_START_FAILED"
     VIDEO_CAPABILITY_NOT_SUPPORTED = "VIDEO_CAPABILITY_NOT_SUPPORTED"
+    # VT-11：inventory snapshot token 过期/漂移（retryable，整轮对账需重启）。
+    VIDEO_CATALOG_SNAPSHOT_EXPIRED = "VIDEO_CATALOG_SNAPSHOT_EXPIRED"
     # 诊断子码（Provider 私有扩展，不属于稳定码表）
     VIDEO_OPERATION_NOT_FOUND = "VIDEO_OPERATION_NOT_FOUND"
     VIDEO_QUERY_NOT_FOUND = "VIDEO_QUERY_NOT_FOUND"
@@ -58,6 +60,8 @@ _DEFAULT_MAP: dict[ErrorCode, tuple[int, bool]] = {
     ErrorCode.VIDEO_RECORD_MISMATCH: (409, False),
     ErrorCode.VIDEO_PLAYBACK_START_FAILED: (502, False),
     ErrorCode.VIDEO_CAPABILITY_NOT_SUPPORTED: (422, False),
+    # 409 + retryable=true（契约 CatalogSnapshotExpired）
+    ErrorCode.VIDEO_CATALOG_SNAPSHOT_EXPIRED: (409, True),
     ErrorCode.VIDEO_OPERATION_NOT_FOUND: (404, False),
     ErrorCode.VIDEO_QUERY_NOT_FOUND: (404, False),
 }

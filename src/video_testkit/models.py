@@ -71,6 +71,8 @@ class InfoData(BaseModel):
     protocol_stack: str = Field(alias="protocolStack")
     record_types_supported: list[str] = Field(alias="recordTypesSupported", default=["ALL", "TIME"])
     auth_enabled: bool = Field(alias="authEnabled")
+    # Provider Epoch（UUID；契约要求 /info 暴露，每次进程启动变化）。
+    provider_epoch: str = Field(alias="providerEpoch", default="")
 
 
 class CapabilityItem(BaseModel):
@@ -125,6 +127,8 @@ class DevicePage(BaseModel):
     page: int
     page_size: int = Field(alias="pageSize")
     total: int
+    # VT-11：inventory 快照轮次 token（契约 x-required-from-contract；无变化时跨页一致）。
+    snapshot_token: str = Field(alias="snapshotToken", default="")
 
 
 class ChannelPage(BaseModel):
@@ -132,6 +136,8 @@ class ChannelPage(BaseModel):
     page: int
     page_size: int = Field(alias="pageSize")
     total: int
+    # VT-11：inventory 快照轮次 token（契约 x-required-from-contract；无变化时跨页一致）。
+    snapshot_token: str = Field(alias="snapshotToken", default="")
 
 
 class DeviceStatusData(BaseModel):

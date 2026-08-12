@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from video_testkit.callback_sink import CallbackSinkState, install_sink_routes, sink_router
 from video_testkit.catalog_client import CatalogClient
 from video_testkit.config import Settings, get_settings
 from video_testkit.errors import ErrorCode, ErrorEnvelope, ProviderError
@@ -36,6 +37,9 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
     settings.validate_startup()
+    # Provider Epoch：进程启动生成一次（契约要求；显式配置则保留确定性）。
+    if not settings.provider_epoch:
+        settings.provider_epoch = uuid.uuid4().hex
 
     store = Store()
     seed_scenario(store)
@@ -71,7 +75,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         service.zlm_client = zlm_client
 
     stop_event = asyncio.Event()
-    worker = EventsDeliveryWorker(store, settings)
+    worker = EventsDeliveryWorker(store, settings, app.state)
     worker_task = asyncio.create_task(worker.run(stop_event))
     simulator.start_maintenance()
     timeout_task = asyncio.create_task(_keepalive_timeout_loop(service, settings, stop_event))
@@ -139,6 +143,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    # VT-11 Callback Sink：运行态事件投递目标与回调 token（控制面可配置，reset 清理）。
+    app.state.events_callback_url = settings.events_callback_url
+    app.state.events_callback_token = settings.events_callback_token
+    app.state.callback_sink = CallbackSinkState()
+    app.state.callback_sink_token = settings.events_callback_token or "testkit-sink-token"
+    install_sink_routes(app, app.state.callback_sink)
 
     @app.middleware("http")
     async def request_id_middleware(
@@ -171,6 +181,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         prefix="/testkit/v1",
         dependencies=[Depends(auth_dependency)],
     )
+    app.include_router(sink_router(), prefix="/testkit/v1")
 
     @app.get("/")
     def index() -> dict[str, str]:

@@ -63,6 +63,10 @@ async def reset(request: Request) -> dict[str, Any]:
     registrar = get_registrar(request)
     if registrar is not None:
         registrar.reset()
+    # VT-11：清理 Callback Sink 接收状态与脚本（不停止监听）。
+    sink = getattr(request.app.state, "callback_sink", None)
+    if sink is not None:
+        sink.reset()
     # 强制关闭本场景遗留的 ZLM RTP 端口/流（幂等；重复 reset 不影响其他场景）。
     zlm = service.zlm_client
     if zlm is not None:

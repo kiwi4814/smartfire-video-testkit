@@ -80,6 +80,10 @@ class Settings(BaseSettings):
     events_callback_url: str | None = None
     events_retry_base_delay: float = Field(default=0.1, gt=0, le=5)
     events_max_attempts: int = Field(default=3, ge=1, le=10)
+    # 事件回调 Bearer token（独立于服务认证；契约要求 token 不进入 payload/日志）。
+    events_callback_token: str = ""
+    # Provider 进程 Epoch（UUID；每次进程启动重新生成，/info 与事件 payload 携带）。
+    provider_epoch: str = ""
 
     # ---- Fake 媒体引用基础地址（URL 不携带任何 secret）----
     media_base_url: str = "http://127.0.0.1:8080"
