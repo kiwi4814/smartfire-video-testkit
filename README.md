@@ -22,7 +22,7 @@ SmartFire 视频测试套件：**Fake Video Provider** + **GB28181 Device Simula
 - `GET /devices`、`GET /devices/{id}`、`GET /devices/{id}/channels`、`GET /devices/{id}/status`（分页/过滤/稳定排序）
 - `POST /devices/{id}/catalog-syncs` + `GET /catalog-syncs/{operationId}`（异步操作机；通过真实 SIP Catalog 查询发现目录，SUCCEEDED/PARTIAL 含 discoveredCount，非破坏性 reconcile）
 - `POST/GET/DELETE /live-streams`（复用返回 200、新建返回 201、DELETE 幂等 204；未配置 ZLM 时保持 Fake Provider 即时 `STREAMING`，配置 ZLM 时先返回 `STARTING`，经真实 SIP INVITE/ACK 和 RTP/PS 到达 ZLM 后才收敛为 `STREAMING`）
-- `POST/GET /device-record-queries`（按小时确定性生成录像目录，`recordType` 仅支持 `ALL`/`TIME`）
+- `POST/GET /device-record-queries`（异步操作机；通过真实 SIP RecordInfo 查询设备录像目录，SUCCEEDED/PARTIAL/FAILED，空窗口成功返回空 items，recordKey 稳定不透明且绑定左闭右开区间）
 - `POST/GET/DELETE /playback-streams`（`recordKey` 优先，`VIDEO_RECORD_MISMATCH` 校验）
 - 统一 envelope `{requestId, data}` / `{requestId, error}`、稳定错误码、`Idempotency-Key`（缺失 400、复用冲突 409）
 - Provider 事件 outbox（CATALOG_CHANGED 等）+ 可选回调投递（httpx，有界重试）
@@ -34,10 +34,11 @@ SmartFire 视频测试套件：**Fake Video Provider** + **GB28181 Device Simula
 - 有界超时；状态与最后错误可查（`GET /devices/{id}/status`）
 - 内置 Fake SIP Registrar（UDP）：请求日志与注册表可通过控制面查看；Provider 侧可向设备发起 Catalog 查询并聚合多消息响应
 - 设备常驻 UDP 监听：接收 Provider 的 Catalog 查询 MESSAGE，按可编排场景响应（normal/multi/duplicate/delayed/missing/malformed/out-of-order/timeout，`POST/GET /devices/{id}/catalog`）
+- 设备侧录像目录（RecordInfo）：响应 Provider 的 RecordInfo 查询 MESSAGE，按可编排场景返回录像 XML（normal/multi/duplicate/delayed/missing/out-of-order/timeout/empty，`POST/GET /devices/{id}/recordinfo`，支持 `timeOffsetSeconds` 控制设备本地时间偏移）
 - 设备侧实时流 UAS：INVITE/SDP/200/ACK/BYE Dialog 生命周期，按场景应答并通过 UDP 发送确定性 H.264 RTP/PS（normal/no-media/wrong-ssrc/lossy/stop-after）；Dialog、SSRC、媒体目标与发送统计经 `/testkit/v1` 脱敏诊断观察
 - 设备在线状态注入（`POST /devices/{id}/status`）、就绪状态注入（`POST /ready`）
 
-**未实现（后续切片）**：设备真实 RecordInfo 查询、H.265/TCP/音频媒体、
+**未实现（后续切片）**：H.265/TCP/音频媒体、
 Provider 事件回调的签名认证、多实例/持久化、OpenAPI 正式发布。
 
 ## 快速开始
@@ -78,6 +79,7 @@ video-testkit --port 8000
 | `ZLM_API_URL` / `ZLM_API_SECRET` | 空 / 空 | 留空关闭 ZLM 集成；配置后 live stream 需等待 ZLM stream-online |
 | `ZLM_RTP_HOST` / `ZLM_RTP_PORT_RANGE` / `ZLM_MEDIA_SERVER_ID` | `127.0.0.1` / `21001-21036` / `testkit-zlm-01` | ZLM RTP 接收地址、端口范围与媒体服务器标识 |
 | `GB_MEDIA_FPS` / `GB_MEDIA_MTU` | `25` / `1200` | 确定性 H.264 RTP/PS 帧率与 RTP payload 上限 |
+| `GB_RECORDINFO_QUERY_TIMEOUT` / `GB_RECORDINFO_SETTLE_WINDOW` | `2.0` / `0.4` | Provider 侧 RecordInfo 查询总超时与响应聚合收尾窗口（秒） |
 
 启动校验：地址格式、端口范围、注册目标自洽、token 长度；Registrar UDP 绑定失败即启动失败。
 
@@ -101,6 +103,15 @@ curl -X POST -H 'Content-Type: application/json' \
 curl -X POST -H "Idempotency-Key: $(uuidgen)" \
   http://127.0.0.1:8000/provider/v1/devices/34020000001320000001/catalog-syncs
 curl http://127.0.0.1:8000/testkit/v1/devices/34020000001320000001/catalog
+
+# 编排 NVR 录像目录为分页（每条 2 条）后，发起 device-record-query 走真实 SIP RecordInfo
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"mode":"multi","pageSize":2}' \
+  http://127.0.0.1:8000/testkit/v1/devices/34020000001320000001/recordinfo
+curl -X POST -H "Idempotency-Key: $(uuidgen)" -H 'Content-Type: application/json' \
+  -d '{"externalDeviceId":"34020000001320000001","externalChannelId":"34020000001310000001","startTime":"2026-08-01T00:00:00.000Z","endTime":"2026-08-01T02:30:00.000Z","recordType":"ALL"}' \
+  http://127.0.0.1:8000/provider/v1/device-record-queries
+curl http://127.0.0.1:8000/testkit/v1/devices/34020000001320000001/recordinfo
 ```
 
 Provider 契约示例（写操作必须带 `Idempotency-Key`）：
@@ -129,6 +140,5 @@ uv build
 
 ## 后续工作
 
-- RecordInfo：设备侧录像目录查询的 SIP 实现，替代内存确定性生成
 - Playback：复用 RTP/PS 媒体能力发送确定性设备录像
 - 可选媒体：TCP、H.265 和音频能力场景

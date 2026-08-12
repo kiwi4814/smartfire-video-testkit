@@ -200,7 +200,7 @@ async def stop_live_stream(provider_stream_key: str, request: Request) -> Respon
 
 
 @router.post("/device-record-queries", status_code=202)
-def submit_record_query(
+async def submit_record_query(
     request: Request,
     body: RecordQueryRequest,
     idem_key: str = Depends(require_idem_key),

@@ -31,6 +31,12 @@ from video_testkit.sip.digest import (
 )
 from video_testkit.sip.keepalive import CONTENT_TYPE
 from video_testkit.sip.message import SipMessage, build_message, parse_message
+from video_testkit.sip.recordinfo import (
+    RecordInfoItemData,
+    build_recordinfo_response_xml,
+    format_gb_time,
+    parse_recordinfo_query,
+)
 from video_testkit.sip.sdp import build_sdp_answer, parse_sdp
 
 logger = logging.getLogger(__name__)
@@ -214,6 +220,33 @@ class LiveScenario:
     dialogs: dict[str, DialogState] = field(default_factory=dict)
 
 
+@dataclass
+class RecordInfoScenario:
+    """设备侧录像目录应答场景（响应 Provider 的 RecordInfo 查询）。
+
+    响应模式：normal（单消息）、multi（分页多消息）、duplicate（重复发送）、
+    delayed（延迟响应）、missing（SumNum 含未发送条数 → PARTIAL）、
+    out-of-order（分页乱序）、timeout（不响应）、empty（空目录）、
+    malformed（畸形 XML）。
+    time_offset_seconds：设备本地时间相对 UTC 的偏移（可正可负），
+    录像区间按设备本地时间生成，返回时间即设备时间（报告中可复现）。
+    """
+
+    mode: str = "normal"
+    page_size: int = 0
+    delay_seconds: float = 0.0
+    missing_count: int = 0
+    time_offset_seconds: int = 0
+    charset: str = DEFAULT_CHARSET
+    revision: int = 0
+    queries_received: int = 0
+    responses_sent: int = 0
+    last_error: str | None = None
+    last_query_sn: int | None = None
+    last_query_at: str | None = None
+    last_channel_id: str | None = None
+
+
 def _dialog_to_tag() -> str:
     return secrets.token_hex(8)
 
@@ -272,6 +305,8 @@ class DeviceSimulator:
         self._catalog_cseq: dict[str, int] = {}
         # 设备侧实时流应答场景与 Dialog 状态。
         self._live_scenarios: dict[str, LiveScenario] = {}
+        # 设备侧录像目录应答场景（RecordInfo）与响应统计。
+        self._recordinfo_scenarios: dict[str, RecordInfoScenario] = {}
 
     # ------------------------------------------------------------ 生命周期
 
@@ -290,6 +325,7 @@ class DeviceSimulator:
                 if dialog.media_task is not None and not dialog.media_task.done():
                     dialog.media_task.cancel()
         self._live_scenarios.clear()
+        self._recordinfo_scenarios.clear()
         self._devices.clear()
         self._known_ids.clear()
 
@@ -342,6 +378,8 @@ class DeviceSimulator:
             self._catalog_scenarios[device_id] = CatalogScenario(items=_default_catalog(device_id))
         if device_id not in self._live_scenarios:
             self._live_scenarios[device_id] = LiveScenario()
+        if device_id not in self._recordinfo_scenarios:
+            self._recordinfo_scenarios[device_id] = RecordInfoScenario()
 
     # ------------------------------------------------------------ 常驻监听与目录
 
@@ -419,7 +457,7 @@ class DeviceSimulator:
         }
 
     async def _handle_listener_datagram(self, device_id: str, data: bytes, addr: Any) -> None:
-        """处理设备收到的 UDP 报文：实时流信令（INVITE/ACK/BYE）或 Catalog 查询。"""
+        """处理设备收到的 UDP 报文：实时流信令（INVITE/ACK/BYE）、Catalog 或 RecordInfo 查询。"""
         try:
             msg = parse_message(data)
         except ValueError:
@@ -436,30 +474,205 @@ class DeviceSimulator:
             return
         if method != "MESSAGE":
             return
+        if await self._handle_catalog_query(device_id, msg, addr):
+            return
+        await self._handle_recordinfo_query(device_id, msg, addr)
+
+    async def _handle_catalog_query(self, device_id: str, msg: SipMessage, addr: Any) -> bool:
+        """处理 Catalog 查询 MESSAGE；消费成功返回 True，非 Catalog 查询返回 False。"""
         scenario = self._catalog_scenarios.get(device_id)
         if scenario is None:
-            return
+            return False
         try:
             query = parse_catalog_query(msg.body_bytes)
         except ValueError:
-            return  # 非 Catalog 查询（如 Keepalive 等）不处理
+            return False  # 非 Catalog 查询（如 Keepalive 等）不处理
 
         scenario.queries_received += 1
         scenario.last_query_sn = query.sn
         scenario.last_query_at = utc_z_now()
 
         if scenario.mode == "timeout":
-            return  # 模拟设备不响应查询
+            return True  # 模拟设备不响应查询
         if scenario.mode == "delayed" and scenario.delay_seconds > 0:
             await asyncio.sleep(scenario.delay_seconds)
         try:
             for body, charset in self._catalog_responses(device_id, query.sn, scenario):
-                await self._send_catalog_response(device_id, addr, body, charset)
+                await self._send_manscdp_response(device_id, addr, body, charset)
                 scenario.responses_sent += 1
             scenario.last_error = None
         except Exception as exc:  # noqa: BLE001  # 上报控制面而非中断监听
             scenario.last_error = str(exc)
             logger.exception("Catalog 响应发送失败", extra={"deviceId": device_id})
+        return True
+
+    # ------------------------------------------------------------ RecordInfo（录像目录）
+
+    def configure_recordinfo(
+        self,
+        device_id: str,
+        *,
+        mode: str = "normal",
+        page_size: int = 0,
+        delay_seconds: float = 0.0,
+        missing_count: int = 0,
+        time_offset_seconds: int = 0,
+        charset: str | None = None,
+    ) -> dict[str, Any]:
+        """安排该设备的录像目录响应场景；每次安排 revision 递增。"""
+        self._require_known(device_id)
+        scenario = self._recordinfo_scenarios[device_id]
+        scenario.mode = mode
+        scenario.page_size = int(page_size)
+        scenario.delay_seconds = float(delay_seconds)
+        scenario.missing_count = int(missing_count)
+        scenario.time_offset_seconds = int(time_offset_seconds)
+        if charset:
+            scenario.charset = charset
+        scenario.last_error = None
+        scenario.revision += 1
+        return self.recordinfo_status(device_id)
+
+    def recordinfo_status(self, device_id: str) -> dict[str, Any]:
+        """设备录像目录场景与响应统计（控制面可查）。"""
+        self._require_known(device_id)
+        scenario = self._recordinfo_scenarios[device_id]
+        return {
+            "externalDeviceId": device_id,
+            "mode": scenario.mode,
+            "pageSize": scenario.page_size,
+            "delaySeconds": scenario.delay_seconds,
+            "missingCount": scenario.missing_count,
+            "timeOffsetSeconds": scenario.time_offset_seconds,
+            "charset": scenario.charset,
+            "revision": str(scenario.revision),
+            "queriesReceived": scenario.queries_received,
+            "responsesSent": scenario.responses_sent,
+            "lastQuerySn": scenario.last_query_sn,
+            "lastQueryAt": scenario.last_query_at,
+            "lastChannelId": scenario.last_channel_id,
+            "lastError": scenario.last_error,
+        }
+
+    async def _handle_recordinfo_query(self, device_id: str, msg: SipMessage, addr: Any) -> None:
+        """处理 RecordInfo 查询 MESSAGE；非 RecordInfo 查询静默返回。"""
+        scenario = self._recordinfo_scenarios.get(device_id)
+        if scenario is None:
+            return
+        try:
+            query = parse_recordinfo_query(msg.body_bytes)
+        except ValueError:
+            return  # 非 RecordInfo 查询（如 Keepalive 等）不处理
+
+        scenario.queries_received += 1
+        scenario.last_query_sn = query.sn
+        scenario.last_query_at = utc_z_now()
+        scenario.last_channel_id = query.device_id
+
+        if scenario.mode == "timeout":
+            return  # 模拟设备不响应查询
+        if scenario.mode == "delayed" and scenario.delay_seconds > 0:
+            await asyncio.sleep(scenario.delay_seconds)
+        try:
+            for body, charset in self._recordinfo_responses(
+                device_id, query.device_id, query.sn, query, scenario
+            ):
+                await self._send_manscdp_response(device_id, addr, body, charset)
+                scenario.responses_sent += 1
+            scenario.last_error = None
+        except Exception as exc:  # noqa: BLE001  # 上报控制面而非中断监听
+            scenario.last_error = str(exc)
+            logger.exception("RecordInfo 响应发送失败", extra={"deviceId": device_id})
+
+    @staticmethod
+    def _recordings_for(
+        channel_id: str, start: datetime, end: datetime
+    ) -> list[RecordInfoItemData]:
+        """按小时切分查询窗口生成确定性录像（左闭右开）；时间已含设备本地偏移。"""
+        chunk = timedelta(hours=1)
+        cursor = start
+        out: list[RecordInfoItemData] = []
+        while cursor < end:
+            chunk_end = min(cursor + chunk, end)
+            out.append(
+                RecordInfoItemData(
+                    device_id=channel_id,
+                    name="",
+                    start_time=cursor,
+                    end_time=chunk_end,
+                    record_type="time",
+                    file_size=0,
+                )
+            )
+            cursor = chunk_end
+        return out
+
+    def _recordinfo_responses(
+        self,
+        device_id: str,
+        channel_id: str,
+        query_sn: int,
+        query: Any,
+        scenario: RecordInfoScenario,
+    ) -> list[tuple[str, str]]:
+        """按场景模式生成 RecordInfo 响应 (body, charset) 列表。"""
+        charset = scenario.charset
+        if scenario.mode == "empty":
+            return [(build_recordinfo_response_xml(query_sn, channel_id, [], 0, charset), charset)]
+        if scenario.mode == "malformed":
+            return [("NOT-VALID-XML{{{", charset)]
+
+        offset = timedelta(seconds=scenario.time_offset_seconds)
+        # 设备本地时间 = 查询 UTC 窗口 + 设备偏移；返回时间为设备时间（报告中可复现）。
+        start = query.start_time + offset
+        end = query.end_time + offset
+        name = self._channel_name(device_id, channel_id)
+        items = [
+            RecordInfoItemData(
+                device_id=channel_id,
+                name=name or f"录像-{format_gb_time(r.start_time)}",
+                start_time=r.start_time,
+                end_time=r.end_time,
+                record_type="time",
+                file_size=0,
+            )
+            for r in self._recordings_for(channel_id, start, end)
+        ]
+        sum_num = len(items)
+
+        if scenario.mode == "missing" and scenario.missing_count > 0:
+            sent = items[: max(0, len(items) - scenario.missing_count)]
+            return [
+                (
+                    build_recordinfo_response_xml(query_sn, channel_id, sent, sum_num, charset),
+                    charset,
+                )
+            ]
+        if scenario.mode in ("multi", "out-of-order"):
+            page = scenario.page_size or 2
+            batches = [items[i : i + page] for i in range(0, len(items), page)]
+            if scenario.mode == "out-of-order" and len(batches) > 1:
+                batches = [batches[-1], *batches[:-1]]  # 末批先发，其余顺序后发
+            return [
+                (
+                    build_recordinfo_response_xml(query_sn, channel_id, batch, sum_num, charset),
+                    charset,
+                )
+                for batch in batches
+            ]
+        body = build_recordinfo_response_xml(query_sn, channel_id, items, sum_num, charset)
+        if scenario.mode == "duplicate":
+            return [(body, charset), (body, charset)]
+        return [(body, charset)]
+
+    def _channel_name(self, device_id: str, channel_id: str) -> str:
+        catalog = self._catalog_scenarios.get(device_id)
+        if catalog is None:
+            return ""
+        for item in catalog.items:
+            if item.device_id == channel_id:
+                return item.name
+        return ""
 
     # ------------------------------------------------------------ 实时流信令（UAS）
 
@@ -767,14 +980,14 @@ class DeviceSimulator:
             return [(body, charset), (body, charset)]
         return [(body, charset)]
 
-    async def _send_catalog_response(
+    async def _send_manscdp_response(
         self,
         device_id: str,
         target_addr: Any,
         body: str,
         charset: str,
     ) -> None:
-        """从设备常驻监听 socket 向查询方（Provider）发送 Catalog 响应 MESSAGE。"""
+        """从设备常驻监听 socket 向查询方（Provider）发送 MANSCDP 响应 MESSAGE。"""
         protocol = self._listeners.get(device_id)
         if protocol is None or protocol.transport is None:
             raise SimulatorError(f"设备监听已关闭: {device_id}")

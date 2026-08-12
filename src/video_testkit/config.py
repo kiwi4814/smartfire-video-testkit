@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     # Provider 侧 Catalog 查询总超时与响应聚合收尾窗口（秒）。
     gb_catalog_query_timeout: float = Field(default=2.0, gt=0, le=30)
     gb_catalog_settle_window: float = Field(default=0.4, gt=0, le=5)
+    # Provider 侧 RecordInfo 查询总超时与响应聚合收尾窗口（秒）。
+    gb_recordinfo_query_timeout: float = Field(default=2.0, gt=0, le=30)
+    gb_recordinfo_settle_window: float = Field(default=0.4, gt=0, le=5)
     # Provider 侧实时流信令：INVITE 等待最终响应、BYE 等待 200 的超时（秒）。
     gb_live_invite_timeout: float = Field(default=2.0, gt=0, le=30)
     gb_live_bye_timeout: float = Field(default=2.0, gt=0, le=30)

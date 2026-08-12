@@ -10,7 +10,7 @@ import asyncio
 import contextlib
 import logging
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from video_testkit.catalog_client import CatalogClient
@@ -46,8 +46,10 @@ from video_testkit.models import (
     StreamSource,
     StreamView,
 )
+from video_testkit.recordinfo_client import RecordInfoClient
 from video_testkit.scenario import seed_scenario
 from video_testkit.sip.catalog import CatalogQueryError
+from video_testkit.sip.recordinfo import RecordInfoQueryError
 from video_testkit.sip.registrar import LiveInviteError
 from video_testkit.state import (
     CatalogOperation,
@@ -97,6 +99,8 @@ class ProviderService:
         self.catalog_client: CatalogClient | None = None
         # Provider 侧实时流信令客户端（app 装配注入；registrar 关闭时为 None）。
         self.live_client: LiveClient | None = None
+        # Provider 侧 RecordInfo 查询客户端（app 装配注入；registrar 关闭时为 None）。
+        self.recordinfo_client: RecordInfoClient | None = None
         # ZLMediaKit 集成客户端（app 装配注入；zlm_api_url 为空时为 None）。
         self.zlm_client: ZlmClient | None = None
 
@@ -454,6 +458,10 @@ class ProviderService:
     def submit_record_query(
         self, req: RecordQueryRequest, idem_key: str
     ) -> tuple[RecordQuery, bool]:
+        """提交设备录像目录查询：ACCEPTED 后后台经真实 SIP RecordInfo 收敛。
+
+        相同 Idempotency-Key 复用既有查询，不向设备发起第二次查询。
+        """
         device = self.require_device(req.external_device_id)
         self.require_online(device)
         channel = self.require_channel(device, req.external_channel_id)
@@ -468,46 +476,74 @@ class ProviderService:
             existing = self.store.record_queries.get(entry.resource_ref)
             if existing is not None:
                 return existing, False
-        items = self._generate_records(
-            device.external_device_id, channel.external_channel_id, req.start_time, req.end_time
-        )
-        for item in items:
-            self.store.records[item.record_key] = item
         query = RecordQuery(
             query_id=f"record-query-{uuid.uuid4().hex}",
             external_device_id=device.external_device_id,
             external_channel_id=channel.external_channel_id,
-            status="SUCCEEDED",
+            status="ACCEPTED",
             submitted_at=now_utc(),
-            completed_at=now_utc(),
-            items=items,
         )
         self.store.record_queries[query.query_id] = query
         entry.resource_ref = query.query_id
+        asyncio.get_running_loop().create_task(
+            self._complete_record_query(
+                query, device, channel, req.start_time, req.end_time, req.record_type
+            )
+        )
         return query, True
 
-    @staticmethod
-    def _generate_records(
-        device_id: str, channel_id: str, start: datetime, end: datetime
-    ) -> list[RecordItemState]:
-        chunk = timedelta(hours=1)
-        cursor = start
-        out: list[RecordItemState] = []
-        while cursor < end:
-            chunk_end = min(cursor + chunk, end)
-            key = f"rec-{channel_id}-{cursor.strftime('%Y%m%dT%H%M%S')}Z"
-            out.append(
-                RecordItemState(
-                    record_key=key,
-                    external_device_id=device_id,
-                    external_channel_id=channel_id,
-                    start_time=cursor,
-                    end_time=chunk_end,
-                    record_type="TIME",
-                )
+    async def _complete_record_query(
+        self,
+        query: RecordQuery,
+        device: DeviceState,
+        channel: ChannelState,
+        start_time: datetime,
+        end_time: datetime,
+        record_type: str,
+    ) -> None:
+        """通过真实 SIP RecordInfo 查询设备录像目录并生成 Provider 视图。
+
+        设备响应按稳定时间区间聚合，重复/乱序不改变结果身份；PARTIAL/timeout
+        保留已收集有效项；完全无响应收敛 FAILED。
+        """
+        query.status = "RUNNING"
+        client = self.recordinfo_client
+        try:
+            if client is None:
+                raise RecordInfoQueryError("RecordInfo 客户端未装配（registrar 关闭）")
+            result = await client.query(
+                device.external_device_id,
+                channel.external_channel_id,
+                start_time,
+                end_time,
+                record_type,
+                timeout=self.settings.gb_recordinfo_query_timeout,
+                settle_window=self.settings.gb_recordinfo_settle_window,
             )
-            cursor = chunk_end
-        return out
+        except (RecordInfoQueryError, TimeoutError) as exc:
+            query.status = "FAILED"
+            query.error = {"reason": str(exc)}
+            query.completed_at = now_utc()
+            return
+
+        items: list[RecordItemState] = []
+        for rec in result.items:
+            # 不透明且稳定：recordKey 绑定通道与左闭右开区间起点，重复查询不变。
+            key = f"rec-{channel.external_channel_id}-{rec.start_time.strftime('%Y%m%dT%H%M%S')}Z"
+            item = RecordItemState(
+                record_key=key,
+                external_device_id=device.external_device_id,
+                external_channel_id=channel.external_channel_id,
+                start_time=rec.start_time,
+                end_time=rec.end_time,
+                record_type="TIME",
+                size_bytes=rec.file_size or None,
+            )
+            items.append(item)
+            self.store.records[item.record_key] = item
+        query.items = items
+        query.status = "SUCCEEDED" if result.complete else "PARTIAL"
+        query.completed_at = now_utc()
 
     def get_record_query(self, query_id: str) -> RecordQuery:
         query = self.store.record_queries.get(query_id)

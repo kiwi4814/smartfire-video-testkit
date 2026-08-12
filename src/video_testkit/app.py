@@ -20,6 +20,7 @@ from video_testkit.events import EventsDeliveryWorker
 from video_testkit.live_client import LiveClient
 from video_testkit.logging_conf import configure_logging, log_ctx, request_id_var
 from video_testkit.provider_api import router as provider_router
+from video_testkit.recordinfo_client import RecordInfoClient
 from video_testkit.scenario import seed_scenario
 from video_testkit.service import ProviderService
 from video_testkit.sip.registrar import SipRegistrar
@@ -56,6 +57,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await registrar.start()  # 绑定失败即启动失败（fail fast）
         service.catalog_client = CatalogClient(registrar, simulator)
         service.live_client = LiveClient(registrar, simulator)
+        service.recordinfo_client = RecordInfoClient(registrar, simulator)
 
     zlm_client: ZlmClient | None = None
     if settings.zlm_api_url:

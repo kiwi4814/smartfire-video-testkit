@@ -271,6 +271,49 @@ def catalog_status(external_device_id: str, request: Request) -> dict[str, Any]:
     return ok(get_request_id(request), simulator.catalog_status(external_device_id))
 
 
+class RecordInfoBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mode: str = Field(default="normal")
+    page_size: int = Field(default=0, ge=0, le=64)
+    delay_seconds: float = Field(default=0.0, ge=0, le=10)
+    missing_count: int = Field(default=0, ge=0, le=64, alias="missingCount")
+    time_offset_seconds: int = Field(default=0, ge=-86400, le=86400, alias="timeOffsetSeconds")
+    charset: str | None = None
+
+
+@router.post("/devices/{external_device_id}/recordinfo")
+def configure_recordinfo(
+    external_device_id: str,
+    request: Request,
+    body: RecordInfoBody,
+) -> dict[str, Any]:
+    """安排设备录像目录应答场景（normal/multi/duplicate/delayed/missing/out-of-order/timeout/empty）。"""
+    simulator = get_simulator(request)
+    service: ProviderService = get_service(request)
+    service.require_device(external_device_id)
+    simulator.set_known_device(external_device_id)
+    view = simulator.configure_recordinfo(
+        external_device_id,
+        mode=body.mode,
+        page_size=body.page_size,
+        delay_seconds=body.delay_seconds,
+        missing_count=body.missing_count,
+        time_offset_seconds=body.time_offset_seconds,
+        charset=body.charset,
+    )
+    return ok(get_request_id(request), view)
+
+
+@router.get("/devices/{external_device_id}/recordinfo")
+def recordinfo_status(external_device_id: str, request: Request) -> dict[str, Any]:
+    """查看设备录像目录场景与响应统计（queriesReceived/responsesSent/timeOffsetSeconds）。"""
+    simulator = get_simulator(request)
+    service: ProviderService = get_service(request)
+    service.require_device(external_device_id)
+    return ok(get_request_id(request), simulator.recordinfo_status(external_device_id))
+
+
 class LiveBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
 

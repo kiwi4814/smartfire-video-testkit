@@ -27,6 +27,13 @@ from video_testkit.sip.catalog import (
 from video_testkit.sip.digest import compute_response, generate_nonce, parse_params
 from video_testkit.sip.keepalive import CONTENT_TYPE, parse_keepalive_xml
 from video_testkit.sip.message import SipMessage, build_message, parse_message
+from video_testkit.sip.recordinfo import (
+    RecordInfoItemData,
+    RecordInfoQueryError,
+    RecordInfoQueryResult,
+    build_recordinfo_query_xml,
+    parse_recordinfo_response,
+)
 from video_testkit.sip.sdp import build_sdp_offer
 
 logger = logging.getLogger(__name__)
@@ -95,6 +102,27 @@ class _CatalogSession:
         self.settle_timer: asyncio.TimerHandle | None = None
 
 
+class _RecordInfoSession:
+    """一次进行中的 RecordInfo 查询会话：按时间区间聚合直到收满或收尾窗口到期。"""
+
+    def __init__(
+        self,
+        channel_id: str,
+        query_sn: int,
+        settle_window: float,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        self.channel_id = channel_id
+        self.query_sn = query_sn
+        self.settle_window = settle_window
+        # 稳定身份：(start_time, end_time) 左闭右开区间，重复/乱序不改变结果身份。
+        self.items: dict[tuple[datetime, datetime], RecordInfoItemData] = {}
+        self.sum_num: int | None = None
+        self.complete = False
+        self.future: asyncio.Future[RecordInfoQueryResult] = loop.create_future()
+        self.settle_timer: asyncio.TimerHandle | None = None
+
+
 @dataclass
 class _UacSession:
     """一次进行中的 UAC 事务（INVITE/BYE），等待匹配的最终响应。"""
@@ -131,6 +159,9 @@ class SipRegistrar:
         # Provider 侧 Catalog 查询会话（每设备最多一个进行中查询）。
         self._catalog_sessions: dict[str, _CatalogSession] = {}
         self._catalog_query_seq: dict[str, int] = {}
+        # Provider 侧 RecordInfo 查询会话（每通道最多一个进行中查询）。
+        self._recordinfo_sessions: dict[str, _RecordInfoSession] = {}
+        self._recordinfo_query_seq: dict[str, int] = {}
         # Provider 侧 UAC 事务（INVITE/BYE），按 Via branch 匹配响应。
         self._uac_sessions: dict[str, _UacSession] = {}
         self._uac_cseq: int = 0
@@ -165,6 +196,13 @@ class SipRegistrar:
                 session.future.cancel()
         self._catalog_sessions.clear()
         self._catalog_query_seq.clear()
+        for ri_session in self._recordinfo_sessions.values():
+            if ri_session.settle_timer is not None:
+                ri_session.settle_timer.cancel()
+            if not ri_session.future.done():
+                ri_session.future.cancel()
+        self._recordinfo_sessions.clear()
+        self._recordinfo_query_seq.clear()
         for uac in self._uac_sessions.values():
             if not uac.future.done():
                 uac.future.cancel()
@@ -302,8 +340,8 @@ class SipRegistrar:
         transport: asyncio.DatagramTransport,
         addr: Any,
     ) -> None:
-        """分派 SIP MESSAGE：优先按 Catalog 响应处理，否则按 Keepalive。"""
-        if self._handle_catalog_response(msg):
+        """分派 SIP MESSAGE：优先按 Catalog/RecordInfo 响应处理，否则按 Keepalive。"""
+        if self._handle_catalog_response(msg) or self._handle_recordinfo_response(msg):
             entry["status"] = 200
             entry["authorized"] = False
             entry["stale"] = False
@@ -419,6 +457,160 @@ class SipRegistrar:
         session.future.set_result(
             CatalogQueryResult(
                 device_id=session.device_id,
+                query_sn=session.query_sn,
+                items=list(session.items.values()),
+                sum_num=session.sum_num or 0,
+                complete=False,
+            )
+        )
+
+    # ------------------------------------------------------------ RecordInfo 查询
+
+    async def query_recordinfo(
+        self,
+        device_id: str,
+        channel_id: str,
+        target: tuple[str, int],
+        start_time: datetime,
+        end_time: datetime,
+        record_type: str,
+        timeout: float,
+        settle_window: float,
+    ) -> RecordInfoQueryResult:
+        """向设备发送 RecordInfo 查询（真实 UDP MESSAGE）并聚合响应。
+
+        收满 ``SumNum``（含 SumNum=0 的空目录）立即返回；已收部分后经过
+        ``settle_window`` 无新响应返回 PARTIAL 结果；完全无响应时抛
+        ``RecordInfoQueryError``。
+        """
+        if self._transport is None:
+            raise RecordInfoQueryError("Registrar 未启动")
+        loop = asyncio.get_running_loop()
+        self._recordinfo_query_seq[channel_id] = self._recordinfo_query_seq.get(channel_id, 0) + 1
+        session = _RecordInfoSession(
+            channel_id, self._recordinfo_query_seq[channel_id], settle_window, loop
+        )
+        self._recordinfo_sessions[channel_id] = session
+        try:
+            self._send_recordinfo_query(
+                device_id,
+                channel_id,
+                target,
+                start_time,
+                end_time,
+                record_type,
+                session.query_sn,
+            )
+            return await asyncio.wait_for(session.future, timeout=timeout)
+        except TimeoutError:
+            if session.items:
+                # 有部分结果但未收满：按 PARTIAL 返回，保留有效项。
+                return RecordInfoQueryResult(
+                    device_id=channel_id,
+                    query_sn=session.query_sn,
+                    items=list(session.items.values()),
+                    sum_num=session.sum_num or 0,
+                    complete=False,
+                )
+            raise RecordInfoQueryError(
+                f"RecordInfo 查询超时且未收到任何响应: {channel_id}"
+            ) from None
+        finally:
+            if session.settle_timer is not None:
+                session.settle_timer.cancel()
+            self._recordinfo_sessions.pop(channel_id, None)
+
+    def _send_recordinfo_query(
+        self,
+        device_id: str,
+        channel_id: str,
+        target: tuple[str, int],
+        start_time: datetime,
+        end_time: datetime,
+        record_type: str,
+        sn: int,
+    ) -> None:
+        """向设备监听地址发送 RecordInfo 查询；body 的 DeviceID 为通道 ID。"""
+        assert self._transport is not None, "Registrar 未启动"
+        host, port = target
+        uri = f"sip:{device_id}@{host}:{port}"
+        body = build_recordinfo_query_xml(channel_id, sn, start_time, end_time, record_type)
+        branch = "z9hG4bK" + uuid.uuid4().hex[:20]
+        headers: list[tuple[str, str]] = [
+            (
+                "Via",
+                f"SIP/2.0/UDP {self._host}:{self._port};branch={branch};rport",
+            ),
+            (
+                "From",
+                f"<sip:{PROVIDER_SIP_ID}@{self._host}:{self._port}>;tag={uuid.uuid4().hex[:12]}",
+            ),
+            ("To", f"<{uri}>"),
+            ("Call-ID", uuid.uuid4().hex),
+            ("CSeq", f"{sn + 1000} MESSAGE"),
+            ("Max-Forwards", "70"),
+            ("Content-Type", CONTENT_TYPE),
+            ("User-Agent", "SmartFire-TestKit-Registrar/0.1.0"),
+        ]
+        self._transport.sendto(build_message(f"MESSAGE {uri} SIP/2.0", headers, body), target)
+
+    def _handle_recordinfo_response(self, msg: SipMessage) -> bool:
+        """解析 RecordInfo 响应 MESSAGE 并聚合到进行中的查询会话；非响应返回 False。"""
+        if not msg.body_bytes:
+            return False
+        try:
+            response = parse_recordinfo_response(msg.body_bytes)
+        except ValueError:
+            return False
+        session = self._recordinfo_sessions.get(response.device_id)
+        if session is None:
+            return False
+        for item in response.items:
+            # 稳定身份 = 左闭右开时间区间：重复/乱序消息不改变聚合结果。
+            session.items[(item.start_time, item.end_time)] = item
+        session.sum_num = response.sum_num
+        if response.sum_num == 0:
+            # 空目录：设备明确声明无录像，立即成功返回空结果。
+            session.complete = True
+            if not session.future.done():
+                session.future.set_result(
+                    RecordInfoQueryResult(
+                        device_id=session.channel_id,
+                        query_sn=session.query_sn,
+                        items=[],
+                        sum_num=0,
+                        complete=True,
+                    )
+                )
+            return True
+        if len(session.items) >= session.sum_num:
+            session.complete = True
+            if not session.future.done():
+                session.future.set_result(
+                    RecordInfoQueryResult(
+                        device_id=session.channel_id,
+                        query_sn=session.query_sn,
+                        items=list(session.items.values()),
+                        sum_num=session.sum_num,
+                        complete=True,
+                    )
+                )
+            return True
+        # 未收满：重置收尾窗口；若收尾时仍不足则按 PARTIAL 返回。
+        if session.settle_timer is not None:
+            session.settle_timer.cancel()
+        if not session.future.done():
+            session.settle_timer = asyncio.get_running_loop().call_later(
+                session.settle_window, self._settle_recordinfo_session, session
+            )
+        return True
+
+    def _settle_recordinfo_session(self, session: _RecordInfoSession) -> None:
+        if session.future.done() or not session.items:
+            return  # 无有效项时等待总超时（避免把延迟响应误判为无响应）
+        session.future.set_result(
+            RecordInfoQueryResult(
+                device_id=session.channel_id,
                 query_sn=session.query_sn,
                 items=list(session.items.values()),
                 sum_num=session.sum_num or 0,
