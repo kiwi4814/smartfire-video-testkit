@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     # 设备侧 Keepalive 发送间隔（秒）；Provider 侧离线判定超时。
     gb_keepalive_interval: float = Field(default=1.0, gt=0, le=300)
     gb_keepalive_timeout: float = Field(default=3.0, gt=0, le=600)
+    # Provider 侧 Catalog 查询总超时与响应聚合收尾窗口（秒）。
+    gb_catalog_query_timeout: float = Field(default=2.0, gt=0, le=30)
+    gb_catalog_settle_window: float = Field(default=0.4, gt=0, le=5)
 
     # ---- Provider 事件投递 ----
     events_callback_url: str | None = None

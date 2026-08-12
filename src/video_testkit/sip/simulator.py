@@ -10,16 +10,25 @@ import contextlib
 import logging
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from video_testkit.config import Settings
+from video_testkit.logging_conf import utc_z_now
+from video_testkit.sip.catalog import (
+    DEFAULT_CHARSET,
+    PROVIDER_SIP_ID,
+    CatalogItemData,
+    build_catalog_response_xml,
+    parse_catalog_query,
+)
 from video_testkit.sip.digest import (
     build_authorization_header,
     generate_cnonce,
     parse_params,
 )
+from video_testkit.sip.keepalive import CONTENT_TYPE
 from video_testkit.sip.message import SipMessage, build_message, parse_message
 
 logger = logging.getLogger(__name__)
@@ -44,6 +53,129 @@ class SimulatorDeviceState:
     keepalive_sn: int = 0
     last_keepalive_at: datetime | None = None
     last_keepalive_error: str | None = None
+
+
+@dataclass
+class CatalogScenario:
+    """设备侧目录场景：内容、响应模式与发送统计。
+
+    响应模式：normal（单消息）、multi（分页多消息）、duplicate（重复发送）、
+    delayed（延迟响应）、missing（缺失通道）、malformed（畸形 XML）、
+    out-of-order（分页乱序）、timeout（不响应）。
+    """
+
+    items: list[CatalogItemData]
+    mode: str = "normal"
+    page_size: int = 0
+    delay_seconds: float = 0.0
+    missing_channel_ids: set[str] = field(default_factory=set)
+    charset: str = DEFAULT_CHARSET
+    revision: int = 0
+    queries_received: int = 0
+    responses_sent: int = 0
+    last_error: str | None = None
+    last_query_sn: int | None = None
+    last_query_at: str | None = None
+
+
+# 默认设备目录（与 Provider 侧 seed 场景的稳定 GB 身份对齐）。
+DEFAULT_NVR_CATALOG = [
+    CatalogItemData(
+        "34020000001310000001",
+        "走廊东门",
+        "TESTKIT",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        True,
+        False,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000002",
+        "走廊西门",
+        "TESTKIT",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1280x720",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000003",
+        "停车场入口",
+        "TESTKIT",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H265",
+        False,
+        False,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000004",
+        "消防通道",
+        "TESTKIT",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        True,
+        True,
+        True,
+    ),
+]
+DEFAULT_IPC_CATALOG = [
+    CatalogItemData(
+        "34020000001310000021",
+        "车间A区",
+        "TESTKIT",
+        "IPC-MOCK",
+        "ON",
+        1,
+        0,
+        "1280x720",
+        "H264",
+        True,
+        True,
+        True,
+    ),
+]
+
+
+def _default_catalog(device_id: str) -> list[CatalogItemData]:
+    if device_id == "34020000001320000001":
+        return list(DEFAULT_NVR_CATALOG)
+    if device_id == "34020000001320000002":
+        return list(DEFAULT_IPC_CATALOG)
+    return []
+
+
+class _ListenerProtocol(asyncio.DatagramProtocol):
+    """设备常驻 UDP 监听：接收 Provider 的 Catalog 查询 MESSAGE。"""
+
+    def __init__(self, simulator: DeviceSimulator, device_id: str) -> None:
+        self._simulator = simulator
+        self._device_id = device_id
+        self.transport: asyncio.DatagramTransport | None = None
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        self.transport = transport  # type: ignore[assignment]
+
+    def datagram_received(self, data: bytes, addr: Any) -> None:
+        asyncio.create_task(self._simulator._handle_listener_datagram(self._device_id, data, addr))
 
 
 class _ClientProtocol(asyncio.DatagramProtocol):
@@ -78,6 +210,11 @@ class DeviceSimulator:
         self._maintenance_task: asyncio.Task[None] | None = None
         self._keepalive_tasks: dict[str, asyncio.Task[None]] = {}
         self._drop_next: set[str] = set()
+        # 设备常驻 UDP 监听（接收 Provider 的 Catalog 查询）。
+        self._listeners: dict[str, _ListenerProtocol] = {}
+        # 设备侧目录场景与响应统计。
+        self._catalog_scenarios: dict[str, CatalogScenario] = {}
+        self._catalog_cseq: dict[str, int] = {}
 
     # ------------------------------------------------------------ 生命周期
 
@@ -86,8 +223,18 @@ class DeviceSimulator:
             task.cancel()
         self._keepalive_tasks.clear()
         self._drop_next.clear()
+        self.close_listeners()
+        self._catalog_scenarios.clear()
+        self._catalog_cseq.clear()
         self._devices.clear()
         self._known_ids.clear()
+
+    def close_listeners(self) -> None:
+        """关闭全部设备常驻监听（reset 与进程退出时释放 UDP socket）。"""
+        for protocol in self._listeners.values():
+            if protocol.transport is not None and not protocol.transport.is_closing():
+                protocol.transport.close()
+        self._listeners.clear()
 
     def start_maintenance(self) -> None:
         """启动注册维护循环：在 expiry 前自动刷新，避免注册过期。幂等。"""
@@ -127,6 +274,177 @@ class DeviceSimulator:
 
     def set_known_device(self, device_id: str) -> None:
         self._known_ids.add(device_id)
+        if device_id not in self._catalog_scenarios:
+            self._catalog_scenarios[device_id] = CatalogScenario(items=_default_catalog(device_id))
+
+    # ------------------------------------------------------------ 常驻监听与目录
+
+    async def _ensure_listener(self, device_id: str) -> None:
+        """为该设备创建常驻 UDP 监听（幂等）；Provider 借此向其发送 Catalog 查询。"""
+        if device_id in self._listeners:
+            return
+        loop = asyncio.get_running_loop()
+        _, protocol = await loop.create_datagram_endpoint(
+            lambda: _ListenerProtocol(self, device_id), local_addr=("127.0.0.1", 0)
+        )
+        self._listeners[device_id] = protocol
+
+    async def ensure_all_listeners(self) -> None:
+        """为所有已知设备创建常驻监听（启动与 reset 后重建）。"""
+        for device_id in sorted(self._known_ids):
+            await self._ensure_listener(device_id)
+
+    def device_listener_addr(self, device_id: str) -> tuple[str, int] | None:
+        """设备常驻监听地址（Provider 查询目标）；无监听返回 None。"""
+        protocol = self._listeners.get(device_id)
+        if protocol is None or protocol.transport is None:
+            return None
+        sockname = protocol.transport.get_extra_info("sockname")
+        return str(sockname[0]), int(sockname[1])
+
+    async def _listener_port(self, device_id: str) -> int:
+        await self._ensure_listener(device_id)
+        addr = self.device_listener_addr(device_id)
+        if addr is None:
+            raise SimulatorError(f"设备监听未就绪: {device_id}")
+        return addr[1]
+
+    def configure_catalog(
+        self,
+        device_id: str,
+        *,
+        mode: str = "normal",
+        page_size: int = 0,
+        delay_seconds: float = 0.0,
+        missing_channel_ids: list[str] | None = None,
+        charset: str | None = None,
+    ) -> dict[str, Any]:
+        """安排该设备的目录响应场景；每次安排 revision 递增。"""
+        self._require_known(device_id)
+        scenario = self._catalog_scenarios[device_id]
+        scenario.mode = mode
+        scenario.page_size = int(page_size)
+        scenario.delay_seconds = float(delay_seconds)
+        scenario.missing_channel_ids = set(missing_channel_ids or [])
+        if charset:
+            scenario.charset = charset
+        scenario.last_error = None
+        scenario.revision += 1
+        return self.catalog_status(device_id)
+
+    def catalog_status(self, device_id: str) -> dict[str, Any]:
+        """设备目录场景与响应统计（控制面可查）。"""
+        self._require_known(device_id)
+        scenario = self._catalog_scenarios[device_id]
+        return {
+            "externalDeviceId": device_id,
+            "mode": scenario.mode,
+            "pageSize": scenario.page_size,
+            "delaySeconds": scenario.delay_seconds,
+            "missingChannelIds": sorted(scenario.missing_channel_ids),
+            "charset": scenario.charset,
+            "revision": str(scenario.revision),
+            "itemCount": len(scenario.items),
+            "queriesReceived": scenario.queries_received,
+            "responsesSent": scenario.responses_sent,
+            "lastQuerySn": scenario.last_query_sn,
+            "lastQueryAt": scenario.last_query_at,
+            "lastError": scenario.last_error,
+        }
+
+    async def _handle_listener_datagram(self, device_id: str, data: bytes, addr: Any) -> None:
+        """处理设备收到的 UDP 报文：解析 Catalog 查询并按场景响应。"""
+        scenario = self._catalog_scenarios.get(device_id)
+        if scenario is None:
+            return
+        try:
+            msg = parse_message(data)
+        except ValueError:
+            return
+        if msg.method() != "MESSAGE":
+            return
+        try:
+            query = parse_catalog_query(msg.body_bytes)
+        except ValueError:
+            return  # 非 Catalog 查询（如 Keepalive 等）不处理
+
+        scenario.queries_received += 1
+        scenario.last_query_sn = query.sn
+        scenario.last_query_at = utc_z_now()
+
+        if scenario.mode == "timeout":
+            return  # 模拟设备不响应查询
+        if scenario.mode == "delayed" and scenario.delay_seconds > 0:
+            await asyncio.sleep(scenario.delay_seconds)
+        try:
+            for body, charset in self._catalog_responses(device_id, query.sn, scenario):
+                await self._send_catalog_response(device_id, addr, body, charset)
+                scenario.responses_sent += 1
+            scenario.last_error = None
+        except Exception as exc:  # noqa: BLE001  # 上报控制面而非中断监听
+            scenario.last_error = str(exc)
+            logger.exception("Catalog 响应发送失败", extra={"deviceId": device_id})
+
+    def _catalog_responses(
+        self, device_id: str, query_sn: int, scenario: CatalogScenario
+    ) -> list[tuple[str, str]]:
+        """按场景模式生成响应 (body, charset) 列表。"""
+        sent_items = [
+            item for item in scenario.items if item.device_id not in scenario.missing_channel_ids
+        ]
+        sum_num = len(scenario.items)  # 总量包含缺失项，驱动 Provider 侧 PARTIAL
+        charset = scenario.charset
+
+        if scenario.mode == "malformed":
+            return [("NOT-VALID-XML{{{", charset)]
+        if scenario.mode in ("multi", "out-of-order"):
+            page = scenario.page_size or 2
+            batches = [sent_items[i : i + page] for i in range(0, len(sent_items), page)]
+            if scenario.mode == "out-of-order" and len(batches) > 1:
+                batches = [batches[-1], *batches[:-1]]  # 末批先发，其余顺序后发
+            bodies = [
+                build_catalog_response_xml(query_sn, device_id, batch, sum_num, charset)
+                for batch in batches
+            ]
+            if scenario.mode == "out-of-order":
+                return [(b, charset) for b in bodies]
+            return [(b, charset) for b in bodies]
+        body = build_catalog_response_xml(query_sn, device_id, sent_items, sum_num, charset)
+        if scenario.mode == "duplicate":
+            return [(body, charset), (body, charset)]
+        return [(body, charset)]
+
+    async def _send_catalog_response(
+        self,
+        device_id: str,
+        target_addr: Any,
+        body: str,
+        charset: str,
+    ) -> None:
+        """从设备常驻监听 socket 向查询方（Provider）发送 Catalog 响应 MESSAGE。"""
+        protocol = self._listeners.get(device_id)
+        if protocol is None or protocol.transport is None:
+            raise SimulatorError(f"设备监听已关闭: {device_id}")
+        local_port = protocol.transport.get_extra_info("sockname")[1]
+        uri = f"sip:{PROVIDER_SIP_ID}@{target_addr[0]}:{target_addr[1]}"
+        branch = "z9hG4bK" + uuid.uuid4().hex[:20]
+        self._catalog_cseq[device_id] = self._catalog_cseq.get(device_id, 0) + 1
+        msg = build_message(
+            f"MESSAGE {uri} SIP/2.0",
+            [
+                ("Via", f"SIP/2.0/UDP 127.0.0.1:{local_port};branch={branch};rport"),
+                ("From", f"<sip:{device_id}@127.0.0.1:{local_port}>;tag={uuid.uuid4().hex[:12]}"),
+                ("To", f"<{uri}>"),
+                ("Call-ID", uuid.uuid4().hex),
+                ("CSeq", f"{self._catalog_cseq[device_id]} MESSAGE"),
+                ("Max-Forwards", "70"),
+                ("Content-Type", CONTENT_TYPE),
+                ("User-Agent", USER_AGENT),
+            ],
+            body,
+            body_encoding=charset,
+        )
+        protocol.transport.sendto(msg, tuple(target_addr))
 
     # ------------------------------------------------------------ Keepalive 控制
 
@@ -380,6 +698,7 @@ class DeviceSimulator:
         )
         try:
             local_port = transport.get_extra_info("sockname")[1]
+            contact_port = await self._listener_port(device_id)
             call_id = uuid.uuid4().hex
             from_tag = uuid.uuid4().hex[:12]
 
@@ -387,7 +706,16 @@ class DeviceSimulator:
             branch1 = "z9hG4bK" + uuid.uuid4().hex[:20]
             msg1 = build_message(
                 f"REGISTER {uri} SIP/2.0",
-                self._base_headers(branch1, device_id, uri, call_id, from_tag, 1, local_port),
+                self._base_headers(
+                    branch1,
+                    device_id,
+                    uri,
+                    call_id,
+                    from_tag,
+                    1,
+                    local_port,
+                    contact_port=contact_port,
+                ),
             )
             transport.sendto(msg1, target)
             resp1 = await self._await_response(protocol, branch1, timeout)
@@ -417,7 +745,16 @@ class DeviceSimulator:
                 branch = "z9hG4bK" + uuid.uuid4().hex[:20]
                 msg = build_message(
                     f"REGISTER {uri} SIP/2.0",
-                    self._base_headers(branch, device_id, uri, call_id, from_tag, cseq, local_port)
+                    self._base_headers(
+                        branch,
+                        device_id,
+                        uri,
+                        call_id,
+                        from_tag,
+                        cseq,
+                        local_port,
+                        contact_port=contact_port,
+                    )
                     + [("Authorization", auth)],
                 )
                 transport.sendto(msg, target)
@@ -462,6 +799,7 @@ class DeviceSimulator:
         )
         try:
             local_port = transport.get_extra_info("sockname")[1]
+            contact_port = await self._listener_port(device_id)
             call_id = uuid.uuid4().hex
             from_tag = uuid.uuid4().hex[:12]
 
@@ -470,7 +808,15 @@ class DeviceSimulator:
             msg1 = build_message(
                 f"REGISTER {uri} SIP/2.0",
                 self._base_headers(
-                    branch1, device_id, uri, call_id, from_tag, 1, local_port, expires=0
+                    branch1,
+                    device_id,
+                    uri,
+                    call_id,
+                    from_tag,
+                    1,
+                    local_port,
+                    expires=0,
+                    contact_port=contact_port,
                 ),
             )
             transport.sendto(msg1, target)
@@ -501,7 +847,15 @@ class DeviceSimulator:
             msg2 = build_message(
                 f"REGISTER {uri} SIP/2.0",
                 self._base_headers(
-                    branch2, device_id, uri, call_id, from_tag, 2, local_port, expires=0
+                    branch2,
+                    device_id,
+                    uri,
+                    call_id,
+                    from_tag,
+                    2,
+                    local_port,
+                    expires=0,
+                    contact_port=contact_port,
                 )
                 + [("Authorization", auth)],
             )
@@ -548,15 +902,17 @@ class DeviceSimulator:
         cseq: int,
         local_port: int,
         expires: int | None = None,
+        contact_port: int | None = None,
     ) -> list[tuple[str, str]]:
         expires_value = self._settings.gb_expires if expires is None else expires
+        contact_port = contact_port or local_port
         return [
             ("Via", f"SIP/2.0/UDP 127.0.0.1:{local_port};branch={branch};rport"),
             ("From", f"<{uri}>;tag={from_tag}"),
             ("To", f"<{uri}>"),
             ("Call-ID", call_id),
             ("CSeq", f"{cseq} REGISTER"),
-            ("Contact", f"<sip:{device_id}@127.0.0.1:{local_port}>"),
+            ("Contact", f"<sip:{device_id}@127.0.0.1:{contact_port}>"),
             ("Max-Forwards", "70"),
             ("Expires", str(expires_value)),
             ("User-Agent", USER_AGENT),

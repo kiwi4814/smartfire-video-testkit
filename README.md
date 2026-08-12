@@ -19,7 +19,7 @@ SmartFire 视频测试套件：**Fake Video Provider** + **GB28181 Device Simula
 
 - `GET /health/live`、`GET /health/ready`、`GET /info`、`GET /capabilities`
 - `GET /devices`、`GET /devices/{id}`、`GET /devices/{id}/channels`、`GET /devices/{id}/status`（分页/过滤/稳定排序）
-- `POST /devices/{id}/catalog-syncs` + `GET /catalog-syncs/{operationId}`（异步操作机，SUCCEEDED 含 discoveredCount）
+- `POST /devices/{id}/catalog-syncs` + `GET /catalog-syncs/{operationId}`（异步操作机；通过真实 SIP Catalog 查询发现目录，SUCCEEDED/PARTIAL 含 discoveredCount，非破坏性 reconcile）
 - `POST/GET/DELETE /live-streams`（复用返回 200、新建返回 201、DELETE 幂等 204）
 - `POST/GET /device-record-queries`（按小时确定性生成录像目录，`recordType` 仅支持 `ALL`/`TIME`）
 - `POST/GET/DELETE /playback-streams`（`recordKey` 优先，`VIDEO_RECORD_MISMATCH` 校验）
@@ -31,10 +31,11 @@ SmartFire 视频测试套件：**Fake Video Provider** + **GB28181 Device Simula
 - 内置场景：1 台 4 通道 NVR + 1 台 IPC（`reset` 可确定性复位）
 - `POST /devices/{id}/register` 触发真实 UDP REGISTER：`401 Digest(MD5, qop=auth)` → Authorization → `200 OK`
 - 有界超时；状态与最后错误可查（`GET /devices/{id}/status`）
-- 内置 Fake SIP Registrar（UDP）：请求日志与注册表可通过控制面查看
+- 内置 Fake SIP Registrar（UDP）：请求日志与注册表可通过控制面查看；Provider 侧可向设备发起 Catalog 查询并聚合多消息响应
+- 设备常驻 UDP 监听：接收 Provider 的 Catalog 查询 MESSAGE，按可编排场景响应（normal/multi/duplicate/delayed/missing/malformed/out-of-order/timeout，`POST/GET /devices/{id}/catalog`）
 - 设备在线状态注入（`POST /devices/{id}/status`）、就绪状态注入（`POST /ready`）
 
-**未实现（后续切片）**：Catalog 全流程（SIP MESSAGE/应答）、RTP-PS 媒体流、设备真实 RecordInfo 查询、
+**未实现（后续切片）**：RTP-PS 媒体流、设备真实 RecordInfo 查询、
 Provider 事件回调的签名认证、多实例/持久化、OpenAPI 正式发布。
 
 ## 快速开始
@@ -87,6 +88,14 @@ curl http://127.0.0.1:8000/testkit/v1/devices/34020000001320000001/status
 
 # 查看 Registrar 收到的请求（应看到 401 挑战与鉴权 REGISTER）
 curl http://127.0.0.1:8000/testkit/v1/sip/registrar/requests
+
+# 编排 NVR 目录为分页（每条 2 通道）后，发起 catalog-sync 走真实 SIP 发现
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"mode":"multi","pageSize":2}' \
+  http://127.0.0.1:8000/testkit/v1/devices/34020000001320000001/catalog
+curl -X POST -H "Idempotency-Key: $(uuidgen)" \
+  http://127.0.0.1:8000/provider/v1/devices/34020000001320000001/catalog-syncs
+curl http://127.0.0.1:8000/testkit/v1/devices/34020000001320000001/catalog
 ```
 
 Provider 契约示例（写操作必须带 `Idempotency-Key`）：

@@ -8,14 +8,23 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import uuid
 from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from video_testkit.logging_conf import utc_z_now
+from video_testkit.sip.catalog import (
+    PROVIDER_SIP_ID,
+    CatalogItemData,
+    CatalogQueryError,
+    CatalogQueryResult,
+    build_catalog_query_xml,
+    parse_catalog_response,
+)
 from video_testkit.sip.digest import compute_response, generate_nonce, parse_params
-from video_testkit.sip.keepalive import parse_keepalive_xml
+from video_testkit.sip.keepalive import CONTENT_TYPE, parse_keepalive_xml
 from video_testkit.sip.message import SipMessage, build_message, parse_message
 
 logger = logging.getLogger(__name__)
@@ -38,6 +47,26 @@ class _RegistrarProtocol(asyncio.DatagramProtocol):
     def datagram_received(self, data: bytes, addr: Any) -> None:
         if self.transport is not None:
             self._registrar.handle_datagram(data, addr, self.transport)
+
+
+class _CatalogSession:
+    """一次进行中的 Catalog 查询会话：聚合响应直到收满或收尾窗口到期。"""
+
+    def __init__(
+        self,
+        device_id: str,
+        query_sn: int,
+        settle_window: float,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        self.device_id = device_id
+        self.query_sn = query_sn
+        self.settle_window = settle_window
+        self.items: dict[str, CatalogItemData] = {}
+        self.sum_num: int | None = None
+        self.complete = False
+        self.future: asyncio.Future[CatalogQueryResult] = loop.create_future()
+        self.settle_timer: asyncio.TimerHandle | None = None
 
 
 class SipRegistrar:
@@ -65,6 +94,9 @@ class SipRegistrar:
         self._nonces: dict[str, datetime] = {}
         self._requests_log: deque[dict[str, Any]] = deque(maxlen=log_limit)
         self._registrations: dict[str, dict[str, Any]] = {}
+        # Provider 侧 Catalog 查询会话（每设备最多一个进行中查询）。
+        self._catalog_sessions: dict[str, _CatalogSession] = {}
+        self._catalog_query_seq: dict[str, int] = {}
 
     # ------------------------------------------------------------ 生命周期
 
@@ -89,6 +121,13 @@ class SipRegistrar:
         self._nonces.clear()
         self._requests_log.clear()
         self._registrations.clear()
+        for session in self._catalog_sessions.values():
+            if session.settle_timer is not None:
+                session.settle_timer.cancel()
+            if not session.future.done():
+                session.future.cancel()
+        self._catalog_sessions.clear()
+        self._catalog_query_seq.clear()
 
     # ------------------------------------------------------------ 查询（控制面）
 
@@ -122,13 +161,14 @@ class SipRegistrar:
             "toUri": msg.header("to"),
             "userAgent": msg.header("user-agent"),
             "sourceAddress": f"{addr[0]}:{addr[1]}",
+            "contentType": msg.header("content-type"),
             "authUsername": None,
             "authorized": False,
             "status": None,
         }
         method = msg.method()
         if method == "MESSAGE":
-            self._handle_keepalive(msg, entry, transport, addr)
+            self._handle_message(msg, entry, transport, addr)
             return
         if method != "REGISTER":
             entry["status"] = 405
@@ -207,6 +247,137 @@ class SipRegistrar:
         expired = [n for n, exp in self._nonces.items() if exp <= now]
         for n in expired:
             self._nonces.pop(n, None)
+
+    def _handle_message(
+        self,
+        msg: SipMessage,
+        entry: dict[str, Any],
+        transport: asyncio.DatagramTransport,
+        addr: Any,
+    ) -> None:
+        """分派 SIP MESSAGE：优先按 Catalog 响应处理，否则按 Keepalive。"""
+        if self._handle_catalog_response(msg):
+            entry["status"] = 200
+            entry["authorized"] = False
+            entry["stale"] = False
+            self._requests_log.append(entry)
+            transport.sendto(self._echo(msg, "SIP/2.0 200 OK"), addr)
+            return
+        self._handle_keepalive(msg, entry, transport, addr)
+
+    # ------------------------------------------------------------ Catalog 查询
+
+    async def query_catalog(
+        self,
+        device_id: str,
+        target: tuple[str, int],
+        timeout: float,
+        settle_window: float,
+    ) -> CatalogQueryResult:
+        """向设备发送 Catalog 查询（真实 UDP MESSAGE）并聚合响应。
+
+        收满 ``SumNum`` 立即返回；已收部分后经过 ``settle_window`` 无新响应
+        返回 PARTIAL 结果；完全无响应时抛 ``CatalogQueryError``。
+        """
+        if self._transport is None:
+            raise CatalogQueryError("Registrar 未启动")
+        loop = asyncio.get_running_loop()
+        self._catalog_query_seq[device_id] = self._catalog_query_seq.get(device_id, 0) + 1
+        session = _CatalogSession(
+            device_id, self._catalog_query_seq[device_id], settle_window, loop
+        )
+        self._catalog_sessions[device_id] = session
+        try:
+            self._send_catalog_query(device_id, target, session.query_sn)
+            return await asyncio.wait_for(session.future, timeout=timeout)
+        except TimeoutError:
+            if session.items:
+                # 有部分结果但未收满：按 PARTIAL 返回，保留有效项。
+                return CatalogQueryResult(
+                    device_id=device_id,
+                    query_sn=session.query_sn,
+                    items=list(session.items.values()),
+                    sum_num=session.sum_num or 0,
+                    complete=False,
+                )
+            raise CatalogQueryError(f"Catalog 查询超时且未收到任何响应: {device_id}") from None
+        finally:
+            if session.settle_timer is not None:
+                session.settle_timer.cancel()
+            self._catalog_sessions.pop(device_id, None)
+
+    def _send_catalog_query(self, device_id: str, target: tuple[str, int], sn: int) -> None:
+        assert self._transport is not None, "Registrar 未启动"
+        host, port = target
+        uri = f"sip:{device_id}@{host}:{port}"
+        body = build_catalog_query_xml(device_id, sn)
+        branch = "z9hG4bK" + uuid.uuid4().hex[:20]
+        headers: list[tuple[str, str]] = [
+            (
+                "Via",
+                f"SIP/2.0/UDP {self._host}:{self._port};branch={branch};rport",
+            ),
+            (
+                "From",
+                f"<sip:{PROVIDER_SIP_ID}@{self._host}:{self._port}>;tag={uuid.uuid4().hex[:12]}",
+            ),
+            ("To", f"<{uri}>"),
+            ("Call-ID", uuid.uuid4().hex),
+            ("CSeq", f"{sn + 1000} MESSAGE"),
+            ("Max-Forwards", "70"),
+            ("Content-Type", CONTENT_TYPE),
+            ("User-Agent", "SmartFire-TestKit-Registrar/0.1.0"),
+        ]
+        self._transport.sendto(build_message(f"MESSAGE {uri} SIP/2.0", headers, body), target)
+
+    def _handle_catalog_response(self, msg: SipMessage) -> bool:
+        """解析 Catalog 响应 MESSAGE 并聚合到进行中的查询会话；非响应返回 False。"""
+        if not msg.body_bytes:
+            return False
+        try:
+            response = parse_catalog_response(msg.body_bytes)
+        except ValueError:
+            return False
+        session = self._catalog_sessions.get(response.device_id)
+        if session is None:
+            return False
+        for item in response.items:
+            session.items[item.device_id] = item
+        session.sum_num = response.sum_num
+        if session.sum_num > 0 and len(session.items) >= session.sum_num:
+            session.complete = True
+            if not session.future.done():
+                session.future.set_result(
+                    CatalogQueryResult(
+                        device_id=session.device_id,
+                        query_sn=session.query_sn,
+                        items=list(session.items.values()),
+                        sum_num=session.sum_num,
+                        complete=True,
+                    )
+                )
+            return True
+        # 未收满：重置收尾窗口；若收尾时仍不足则按 PARTIAL 返回。
+        if session.settle_timer is not None:
+            session.settle_timer.cancel()
+        if not session.future.done():
+            session.settle_timer = asyncio.get_running_loop().call_later(
+                session.settle_window, self._settle_catalog_session, session
+            )
+        return True
+
+    def _settle_catalog_session(self, session: _CatalogSession) -> None:
+        if session.future.done() or not session.items:
+            return  # 无有效项时等待总超时（避免把延迟响应误判为无响应）
+        session.future.set_result(
+            CatalogQueryResult(
+                device_id=session.device_id,
+                query_sn=session.query_sn,
+                items=list(session.items.values()),
+                sum_num=session.sum_num or 0,
+                complete=False,
+            )
+        )
 
     def _handle_keepalive(
         self,

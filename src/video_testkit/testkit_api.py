@@ -46,13 +46,14 @@ def get_registrar(request: Request) -> SipRegistrar | None:
 
 
 @router.post("/reset")
-def reset(request: Request) -> dict[str, Any]:
+async def reset(request: Request) -> dict[str, Any]:
     service = get_service(request)
     counts = service.reset()
     simulator = get_simulator(request)
     simulator.reset()
     for device_id in get_store(request).devices:
         simulator.set_known_device(device_id)
+    await simulator.ensure_all_listeners()  # 同步重建常驻监听（新端口），reset 返回即可查询
     registrar = get_registrar(request)
     if registrar is not None:
         registrar.reset()
@@ -215,6 +216,47 @@ def keepalive_malformed(
         get_request_id(request),
         {"externalDeviceId": external_device_id, "status": "SENT_MALFORMED"},
     )
+
+
+class CatalogBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mode: str = Field(default="normal")
+    page_size: int = Field(default=0, ge=0, le=64)
+    delay_seconds: float = Field(default=0.0, ge=0, le=10)
+    missing_channel_ids: list[str] = Field(default_factory=list, alias="missingChannelIds")
+    charset: str | None = None
+
+
+@router.post("/devices/{external_device_id}/catalog")
+def configure_catalog(
+    external_device_id: str,
+    request: Request,
+    body: CatalogBody,
+) -> dict[str, Any]:
+    """安排设备目录响应场景（normal/multi/duplicate/delayed/missing/malformed/out-of-order/timeout）。"""
+    simulator = get_simulator(request)
+    service: ProviderService = get_service(request)
+    service.require_device(external_device_id)
+    simulator.set_known_device(external_device_id)
+    view = simulator.configure_catalog(
+        external_device_id,
+        mode=body.mode,
+        page_size=body.page_size,
+        delay_seconds=body.delay_seconds,
+        missing_channel_ids=body.missing_channel_ids,
+        charset=body.charset,
+    )
+    return ok(get_request_id(request), view)
+
+
+@router.get("/devices/{external_device_id}/catalog")
+def catalog_status(external_device_id: str, request: Request) -> dict[str, Any]:
+    """查看设备目录场景与响应统计（queriesReceived/responsesSent/最后查询 SN）。"""
+    simulator = get_simulator(request)
+    service: ProviderService = get_service(request)
+    service.require_device(external_device_id)
+    return ok(get_request_id(request), simulator.catalog_status(external_device_id))
 
 
 @router.get("/devices/{external_device_id}/status")

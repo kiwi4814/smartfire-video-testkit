@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from video_testkit.catalog_client import CatalogClient
 from video_testkit.config import Settings, get_settings
 from video_testkit.errors import ErrorCode, ErrorEnvelope, ProviderError
 from video_testkit.events import EventsDeliveryWorker
@@ -39,6 +40,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     simulator = DeviceSimulator(settings)
     for device_id in store.devices:
         simulator.set_known_device(device_id)
+    await simulator.ensure_all_listeners()  # 设备常驻监听：Provider Catalog 查询目标
 
     registrar: SipRegistrar | None = None
     if settings.registrar_enabled:
@@ -50,6 +52,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             on_keepalive=service.record_keepalive,
         )
         await registrar.start()  # 绑定失败即启动失败（fail fast）
+        service.catalog_client = CatalogClient(registrar, simulator)
 
     stop_event = asyncio.Event()
     worker = EventsDeliveryWorker(store, settings)
@@ -82,6 +85,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         with contextlib.suppress(asyncio.CancelledError):
             await timeout_task
         await simulator.stop_maintenance()
+        simulator.close_listeners()
         if registrar is not None:
             await registrar.stop()
 

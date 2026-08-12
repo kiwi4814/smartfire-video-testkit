@@ -11,6 +11,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
+from video_testkit.catalog_client import CatalogClient
 from video_testkit.config import Settings
 from video_testkit.errors import ErrorCode, invalid_argument, provider_error
 from video_testkit.events import record_event
@@ -43,6 +44,7 @@ from video_testkit.models import (
     StreamView,
 )
 from video_testkit.scenario import seed_scenario
+from video_testkit.sip.catalog import CatalogQueryError
 from video_testkit.state import (
     CatalogOperation,
     ChannelState,
@@ -84,6 +86,8 @@ class ProviderService:
         self.store = store
         self.settings = settings
         self.idempotency = IdempotencyStore()
+        # Provider 侧 Catalog 查询客户端（app 装配注入；registrar 关闭时为 None）。
+        self.catalog_client: CatalogClient | None = None
 
     # ------------------------------------------------------------ 资源查找
 
@@ -212,15 +216,50 @@ class ProviderService:
         return op, True
 
     async def _complete_catalog_sync(self, op: CatalogOperation, device: DeviceState) -> None:
-        await asyncio.sleep(0.05)
+        """通过真实 SIP Catalog 查询发现设备目录并更新 Provider 视图。
+
+        非破坏性 reconcile：仅 upsert 发现的通道，不把目录缺失断言为业务删除；
+        重复 Catalog 按稳定 DeviceID 去重，不产生重复资源。
+        """
         op.status = "RUNNING"
-        await asyncio.sleep(0.05)
+        client = self.catalog_client
+        try:
+            if client is None:
+                raise CatalogQueryError("Catalog 客户端未装配（registrar 关闭）")
+            result = await client.query(
+                device.external_device_id,
+                timeout=self.settings.gb_catalog_query_timeout,
+                settle_window=self.settings.gb_catalog_settle_window,
+            )
+        except (CatalogQueryError, TimeoutError) as exc:
+            op.status = "FAILED"
+            op.error = {"reason": str(exc)}
+            op.completed_at = now_utc()
+            return
+
         device.revision = self.store.next_revision()
-        for channel in device.channels.values():
-            channel.revision = self.store.next_revision()
-            channel.updated_at = now_utc()
-        op.discovered_count = device.channel_count
-        op.status = "SUCCEEDED"
+        for item in result.items:
+            channel = device.channels.get(item.device_id)
+            if channel is None:
+                device.channels[item.device_id] = ChannelState(
+                    external_device_id=device.external_device_id,
+                    external_channel_id=item.device_id,
+                    source_name=item.name,
+                    manufacturer=item.manufacturer,
+                    model=item.model,
+                    online_status="ONLINE" if item.status == "ON" else "OFFLINE",
+                    resolution=item.resolution or "1280x720",
+                    codec=item.codec or "H264",
+                    has_audio=item.has_audio,
+                    supports_ptz=item.supports_ptz,
+                    supports_device_record=item.supports_device_record,
+                    revision=self.store.next_revision(),
+                )
+            else:
+                channel.revision = self.store.next_revision()
+                channel.updated_at = now_utc()
+        op.discovered_count = len(result.items)
+        op.status = "SUCCEEDED" if result.complete else "PARTIAL"
         op.completed_at = now_utc()
         record_event(
             self.store,
@@ -228,7 +267,11 @@ class ProviderService:
             "CATALOG_CHANGED",
             device.external_device_id,
             None,
-            {"discoveredCount": op.discovered_count},
+            {
+                "discoveredCount": op.discovered_count,
+                "complete": result.complete,
+                "sumNum": result.sum_num,
+            },
         )
 
     def get_catalog_operation(self, operation_id: str) -> CatalogOperation:
