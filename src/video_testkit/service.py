@@ -527,6 +527,54 @@ class ProviderService:
             return "NOT_READY"
         return "READY"
 
+    # ------------------------------------------------------------ Keepalive 收敛
+
+    def record_keepalive(self, device_id: str, sn: int) -> None:
+        """Provider 收到设备 Keepalive 心跳：刷新心跳时间，离线设备恢复 ONLINE。"""
+        device = self.store.devices.get(device_id)
+        if device is None:
+            # 未知设备不建立状态；心跳不驱动协议外身份。
+            return
+        now = now_utc()
+        was_offline = device.online_status != "ONLINE"
+        device.keepalive_seen_at = now
+        device.last_seen_at = now
+        device.revision = self.store.next_revision()
+        device.updated_at = now
+        if was_offline:
+            device.online_status = "ONLINE"
+            record_event(
+                self.store,
+                self.settings,
+                "DEVICE_ONLINE",
+                device_id,
+                None,
+                {"onlineStatus": "ONLINE", "keepaliveSn": sn},
+            )
+
+    def expire_stale_devices(self) -> int:
+        """将超过 ``gb_keepalive_timeout`` 未心跳的在线设备置为 OFFLINE。返回变更数。"""
+        now = now_utc()
+        timeout_sec = self.settings.gb_keepalive_timeout
+        changed = 0
+        for device in self.store.devices.values():
+            if device.online_status != "ONLINE" or device.keepalive_seen_at is None:
+                continue
+            if (now - device.keepalive_seen_at).total_seconds() <= timeout_sec:
+                continue
+            device.online_status = "OFFLINE"
+            device.revision = self.store.next_revision()
+            record_event(
+                self.store,
+                self.settings,
+                "DEVICE_OFFLINE",
+                device.external_device_id,
+                None,
+                {"onlineStatus": "OFFLINE"},
+            )
+            changed += 1
+        return changed
+
     # ------------------------------------------------------------ 视图转换
 
     def device_view(self, d: DeviceState) -> ProviderDevice:

@@ -9,11 +9,13 @@ import asyncio
 import logging
 import secrets
 from collections import deque
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from video_testkit.logging_conf import utc_z_now
 from video_testkit.sip.digest import compute_response, generate_nonce, parse_params
+from video_testkit.sip.keepalive import parse_keepalive_xml
 from video_testkit.sip.message import SipMessage, build_message, parse_message
 
 logger = logging.getLogger(__name__)
@@ -49,6 +51,7 @@ class SipRegistrar:
         password: str,
         log_limit: int = 500,
         nonce_ttl: timedelta = NONCE_TTL,
+        on_keepalive: Callable[[str, int], None] | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -56,6 +59,8 @@ class SipRegistrar:
         self._password = password
         self._log_limit = log_limit
         self._nonce_ttl = nonce_ttl
+        # Keepalive 回调：收到有效 MESSAGE 心跳时调用 (device_id, sn)。
+        self._on_keepalive = on_keepalive
         self._transport: asyncio.DatagramTransport | None = None
         self._nonces: dict[str, datetime] = {}
         self._requests_log: deque[dict[str, Any]] = deque(maxlen=log_limit)
@@ -121,7 +126,11 @@ class SipRegistrar:
             "authorized": False,
             "status": None,
         }
-        if msg.method() != "REGISTER":
+        method = msg.method()
+        if method == "MESSAGE":
+            self._handle_keepalive(msg, entry, transport, addr)
+            return
+        if method != "REGISTER":
             entry["status"] = 405
             self._requests_log.append(entry)
             transport.sendto(self._not_implemented(msg), addr)
@@ -198,6 +207,34 @@ class SipRegistrar:
         expired = [n for n, exp in self._nonces.items() if exp <= now]
         for n in expired:
             self._nonces.pop(n, None)
+
+    def _handle_keepalive(
+        self,
+        msg: SipMessage,
+        entry: dict[str, Any],
+        transport: asyncio.DatagramTransport,
+        addr: Any,
+    ) -> None:
+        """处理 SIP MESSAGE：解析 Keepalive XML 并通知上层（回调）。"""
+        try:
+            keepalive = parse_keepalive_xml(msg.body)
+        except ValueError:
+            entry["status"] = 400
+            entry["authorized"] = False
+            entry["stale"] = False
+            self._requests_log.append(entry)
+            logger.debug("registrar: 丢弃畸形 Keepalive 报文")
+            transport.sendto(self._echo(msg, "SIP/2.0 400 Bad Request"), addr)
+            return
+
+        entry["status"] = 200
+        entry["authorized"] = False
+        entry["stale"] = False
+        self._requests_log.append(entry)
+        transport.sendto(self._echo(msg, "SIP/2.0 200 OK"), addr)
+
+        if self._on_keepalive is not None:
+            self._on_keepalive(keepalive.device_id, keepalive.sn)
 
     @staticmethod
     def _expires_of(msg: SipMessage) -> int | None:

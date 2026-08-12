@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     # 到期前提前多少秒自动发起 REGISTER 刷新（后台维护循环）。
     gb_refresh_margin: float = Field(default=2.0, gt=0, le=300)
     gb_register_timeout: float = Field(default=3.0, gt=0, le=30)
+    # 设备侧 Keepalive 发送间隔（秒）；Provider 侧离线判定超时。
+    gb_keepalive_interval: float = Field(default=1.0, gt=0, le=300)
+    gb_keepalive_timeout: float = Field(default=3.0, gt=0, le=600)
 
     # ---- Provider 事件投递 ----
     events_callback_url: str | None = None

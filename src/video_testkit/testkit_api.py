@@ -141,6 +141,82 @@ def trigger_unregister(
     )
 
 
+# ---------------------------------------------------------------- Keepalive 控制
+
+
+@router.post("/devices/{external_device_id}/keepalive/start")
+async def keepalive_start(external_device_id: str, request: Request) -> dict[str, Any]:
+    service: ProviderService = get_service(request)
+    service.require_device(external_device_id)
+    simulator = get_simulator(request)
+    simulator.set_known_device(external_device_id)
+    view = simulator.start_keepalive(external_device_id)
+    return ok(get_request_id(request), view)
+
+
+@router.post("/devices/{external_device_id}/keepalive/pause")
+async def keepalive_pause(external_device_id: str, request: Request) -> dict[str, Any]:
+    service: ProviderService = get_service(request)
+    service.require_device(external_device_id)
+    simulator = get_simulator(request)
+    view = simulator.stop_keepalive(external_device_id)
+    return ok(get_request_id(request), view)
+
+
+@router.post("/devices/{external_device_id}/keepalive/resume")
+async def keepalive_resume(external_device_id: str, request: Request) -> dict[str, Any]:
+    service: ProviderService = get_service(request)
+    service.require_device(external_device_id)
+    simulator = get_simulator(request)
+    simulator.set_known_device(external_device_id)
+    view = simulator.resume_keepalive(external_device_id)
+    return ok(get_request_id(request), view)
+
+
+@router.post("/devices/{external_device_id}/keepalive/drop")
+async def keepalive_drop(external_device_id: str, request: Request) -> dict[str, Any]:
+    service: ProviderService = get_service(request)
+    service.require_device(external_device_id)
+    simulator = get_simulator(request)
+    simulator.set_known_device(external_device_id)
+    view = simulator.drop_next_keepalive(external_device_id)
+    return ok(get_request_id(request), view)
+
+
+@router.post("/devices/{external_device_id}/keepalive/send")
+def keepalive_send(
+    external_device_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    service: ProviderService = get_service(request)
+    service.require_device(external_device_id)
+    simulator = get_simulator(request)
+    simulator.set_known_device(external_device_id)
+    background_tasks.add_task(simulator.send_keepalive, external_device_id)
+    return ok(
+        get_request_id(request),
+        {"externalDeviceId": external_device_id, "status": "SENT"},
+    )
+
+
+@router.post("/devices/{external_device_id}/keepalive/malformed")
+def keepalive_malformed(
+    external_device_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    service: ProviderService = get_service(request)
+    service.require_device(external_device_id)
+    simulator = get_simulator(request)
+    simulator.set_known_device(external_device_id)
+    background_tasks.add_task(simulator.send_keepalive, external_device_id, malformed=True)
+    return ok(
+        get_request_id(request),
+        {"externalDeviceId": external_device_id, "status": "SENT_MALFORMED"},
+    )
+
+
 @router.get("/devices/{external_device_id}/status")
 def device_simulator_status(external_device_id: str, request: Request) -> dict[str, Any]:
     service: ProviderService = get_service(request)

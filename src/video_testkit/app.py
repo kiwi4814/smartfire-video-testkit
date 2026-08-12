@@ -33,16 +33,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
     settings.validate_startup()
 
-    registrar: SipRegistrar | None = None
-    if settings.registrar_enabled:
-        registrar = SipRegistrar(
-            host=settings.registrar_host,
-            port=settings.registrar_port,
-            realm=settings.gb_realm,
-            password=settings.gb_password,
-        )
-        await registrar.start()  # 绑定失败即启动失败（fail fast）
-
     store = Store()
     seed_scenario(store)
     service = ProviderService(store, settings)
@@ -50,10 +40,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     for device_id in store.devices:
         simulator.set_known_device(device_id)
 
+    registrar: SipRegistrar | None = None
+    if settings.registrar_enabled:
+        registrar = SipRegistrar(
+            host=settings.registrar_host,
+            port=settings.registrar_port,
+            realm=settings.gb_realm,
+            password=settings.gb_password,
+            on_keepalive=service.record_keepalive,
+        )
+        await registrar.start()  # 绑定失败即启动失败（fail fast）
+
     stop_event = asyncio.Event()
     worker = EventsDeliveryWorker(store, settings)
     worker_task = asyncio.create_task(worker.run(stop_event))
     simulator.start_maintenance()
+    timeout_task = asyncio.create_task(_keepalive_timeout_loop(service, settings, stop_event))
 
     app.state.store = store
     app.state.service = service
@@ -76,9 +78,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         worker_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await worker_task
+        timeout_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await timeout_task
         await simulator.stop_maintenance()
         if registrar is not None:
             await registrar.stop()
+
+
+async def _keepalive_timeout_loop(
+    service: ProviderService, settings: Settings, stop_event: asyncio.Event
+) -> None:
+    """后台扫描：将超过 ``gb_keepalive_timeout`` 未心跳的在线设备置为 OFFLINE。"""
+    del settings  # 经 service 读取配置，避免未使用参数
+    while not stop_event.is_set():
+        service.expire_stale_devices()
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=0.2)
+        except TimeoutError:
+            pass
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

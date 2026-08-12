@@ -48,6 +48,8 @@ class DeviceState:
     last_seen_at: datetime | None
     revision: str
     updated_at: datetime = field(default_factory=now_utc)
+    # 最近一次 Keepalive 心跳时间；仅收到过心跳的设备参与离线超时收敛。
+    keepalive_seen_at: datetime | None = None
     channels: dict[str, ChannelState] = field(default_factory=dict)
 
     @property

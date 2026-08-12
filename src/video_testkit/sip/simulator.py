@@ -39,6 +39,11 @@ class SimulatorDeviceState:
     attempt_count: int = 0
     # 最近一次成功注册使用的身份（username + contact），用于验证身份确定性。
     last_identity: str | None = None
+    # Keepalive 心跳状态。
+    keepalive_active: bool = False
+    keepalive_sn: int = 0
+    last_keepalive_at: datetime | None = None
+    last_keepalive_error: str | None = None
 
 
 class _ClientProtocol(asyncio.DatagramProtocol):
@@ -71,10 +76,16 @@ class DeviceSimulator:
         self._now_fn = now_fn or (lambda: datetime.now(UTC))
         self._stop_event: asyncio.Event | None = None
         self._maintenance_task: asyncio.Task[None] | None = None
+        self._keepalive_tasks: dict[str, asyncio.Task[None]] = {}
+        self._drop_next: set[str] = set()
 
     # ------------------------------------------------------------ 生命周期
 
     def reset(self) -> None:
+        for task in self._keepalive_tasks.values():
+            task.cancel()
+        self._keepalive_tasks.clear()
+        self._drop_next.clear()
         self._devices.clear()
         self._known_ids.clear()
 
@@ -117,6 +128,151 @@ class DeviceSimulator:
     def set_known_device(self, device_id: str) -> None:
         self._known_ids.add(device_id)
 
+    # ------------------------------------------------------------ Keepalive 控制
+
+    def start_keepalive(self, device_id: str) -> dict[str, Any]:
+        """启动该设备的周期 Keepalive 发送循环（真实 SIP MESSAGE）。幂等。"""
+        self._require_known(device_id)
+        state = self._devices.setdefault(device_id, SimulatorDeviceState())
+        if state.keepalive_active:
+            return self._view(device_id, state)
+        state.keepalive_active = True
+        state.last_keepalive_error = None
+        task = asyncio.create_task(self._keepalive_loop(device_id))
+        self._keepalive_tasks[device_id] = task
+        return self._view(device_id, state)
+
+    def stop_keepalive(self, device_id: str) -> dict[str, Any]:
+        """暂停该设备的 Keepalive 发送（模拟心跳中断）。"""
+        state = self._devices.setdefault(device_id, SimulatorDeviceState())
+        state.keepalive_active = False
+        task = self._keepalive_tasks.pop(device_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+        return self._view(device_id, state)
+
+    def resume_keepalive(self, device_id: str) -> dict[str, Any]:
+        """恢复该设备的 Keepalive 发送。"""
+        return self.start_keepalive(device_id)
+
+    def drop_next_keepalive(self, device_id: str) -> dict[str, Any]:
+        """跳过下一次 Keepalive 发送（模拟单次丢包）。"""
+        self._require_known(device_id)
+        self._drop_next.add(device_id)
+        state = self._devices.setdefault(device_id, SimulatorDeviceState())
+        return self._view(device_id, state)
+
+    async def send_keepalive(self, device_id: str, malformed: bool = False) -> dict[str, Any]:
+        """立即发送一次 Keepalive（真实 UDP），返回 Provider 响应结果。"""
+        self._require_known(device_id)
+        state = self._devices.setdefault(device_id, SimulatorDeviceState())
+        state.last_keepalive_error = None
+
+        timeout = self._settings.gb_register_timeout
+        reg_host, reg_port = self._split_addr(self._settings.effective_gb_registrar_addr)
+        uri = f"sip:{device_id}@{reg_host}:{reg_port}"
+        try:
+            status_code = await self._keepalive_trip(
+                device_id, uri, (reg_host, reg_port), timeout, malformed, state
+            )
+            state.last_keepalive_at = self._now_fn()
+            return {
+                "externalDeviceId": device_id,
+                "statusCode": status_code,
+                "malformed": malformed,
+            }
+        except (TimeoutError, SimulatorError, ValueError) as exc:
+            state.last_keepalive_error = str(exc)
+            return {
+                "externalDeviceId": device_id,
+                "statusCode": None,
+                "malformed": malformed,
+                "error": str(exc),
+            }
+        except OSError as exc:
+            state.last_keepalive_error = f"UDP 发送失败: {exc}"
+            return {
+                "externalDeviceId": device_id,
+                "statusCode": None,
+                "malformed": malformed,
+                "error": str(exc),
+            }
+
+    async def _keepalive_loop(self, device_id: str) -> None:
+        """周期发送 Keepalive；支持 pause（cancel）与单次 drop 标记。"""
+        interval = self._settings.gb_keepalive_interval
+        state = self._devices.get(device_id)
+        while state is not None and state.keepalive_active:
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                return
+            if device_id in self._drop_next:
+                self._drop_next.discard(device_id)
+                continue
+            try:
+                await self.send_keepalive(device_id)
+            except Exception:
+                logger.exception("Keepalive 发送失败", extra={"deviceId": device_id})
+            state = self._devices.get(device_id)
+
+    async def _keepalive_trip(
+        self,
+        device_id: str,
+        uri: str,
+        target: tuple[str, int],
+        timeout: float,
+        malformed: bool,
+        state: SimulatorDeviceState,
+    ) -> int:
+        loop = asyncio.get_running_loop()
+        transport, protocol = await loop.create_datagram_endpoint(
+            _ClientProtocol, local_addr=("127.0.0.1", 0)
+        )
+        try:
+            local_port = transport.get_extra_info("sockname")[1]
+            state.keepalive_sn += 1
+            branch = "z9hG4bK" + uuid.uuid4().hex[:20]
+            msg = self._keepalive_message(
+                device_id, uri, local_port, branch, state.keepalive_sn, malformed
+            )
+            transport.sendto(msg, target)
+            resp = await self._await_response(protocol, branch, timeout)
+            code = resp.status_code()
+            if code is None or code != 200:
+                raise SimulatorError(f"Keepalive 预期 200，实际 {code}")
+            return int(code)
+        finally:
+            transport.close()
+
+    def _keepalive_message(
+        self,
+        device_id: str,
+        uri: str,
+        local_port: int,
+        branch: str,
+        sn: int,
+        malformed: bool,
+    ) -> bytes:
+        from video_testkit.sip.keepalive import CONTENT_TYPE, build_keepalive_xml
+
+        body = "NOT-VALID-XML{{{" if malformed else build_keepalive_xml(device_id, sn)
+        headers: list[tuple[str, str]] = [
+            ("Via", f"SIP/2.0/UDP 127.0.0.1:{local_port};branch={branch};rport"),
+            ("From", f"<{uri}>;tag={uuid.uuid4().hex[:12]}"),
+            ("To", f"<{uri}>"),
+            ("Call-ID", uuid.uuid4().hex),
+            ("CSeq", f"{sn + 1000} MESSAGE"),
+            ("Max-Forwards", "70"),
+            ("Content-Type", CONTENT_TYPE),
+            ("User-Agent", USER_AGENT),
+        ]
+        return build_message(f"MESSAGE {uri} SIP/2.0", headers, body)
+
+    def _require_known(self, device_id: str) -> None:
+        if device_id not in self._known_ids:
+            raise KeyError(f"未知设备: {device_id}")
+
     def status(self, device_id: str) -> dict[str, Any] | None:
         state = self._devices.setdefault(device_id, SimulatorDeviceState())
         return self._view(device_id, state)
@@ -145,6 +301,14 @@ class DeviceSimulator:
             "lastError": state.last_error,
             "attemptCount": state.attempt_count,
             "lastIdentity": state.last_identity,
+            "keepaliveActive": state.keepalive_active,
+            "keepaliveSn": state.keepalive_sn,
+            "lastKeepaliveAt": (
+                state.last_keepalive_at.isoformat().replace("+00:00", "Z")
+                if state.last_keepalive_at
+                else None
+            ),
+            "lastKeepaliveError": state.last_keepalive_error,
         }
 
     # ------------------------------------------------------------ 触发注册
