@@ -197,6 +197,10 @@ class DialogState:
     media_dropped: int = 0
 
 
+class SimulatorError(Exception):
+    """注册流程中出现的可预期错误（非超时）。"""
+
+
 @dataclass
 class LiveScenario:
     """设备侧实时流应答场景（响应 Provider 的 INVITE）。
@@ -218,6 +222,13 @@ class LiveScenario:
     invites_received: int = 0
     last_error: str | None = None
     dialogs: dict[str, DialogState] = field(default_factory=dict)
+
+
+@dataclass
+class PlaybackScenario(LiveScenario):
+    """设备侧回放流应答场景（结构继承自 LiveScenario）。"""
+
+    pass
 
 
 @dataclass
@@ -278,10 +289,6 @@ class _ClientProtocol(asyncio.DatagramProtocol):
         self.queue.put_nowait((data, addr))
 
 
-class SimulatorError(Exception):
-    """注册流程中出现的可预期错误（非超时）。"""
-
-
 class DeviceSimulator:
     """为场景中的每台设备维护 SIP 注册状态，并按需触发 REGISTER/UNREGISTER 流程。"""
 
@@ -305,6 +312,8 @@ class DeviceSimulator:
         self._catalog_cseq: dict[str, int] = {}
         # 设备侧实时流应答场景与 Dialog 状态。
         self._live_scenarios: dict[str, LiveScenario] = {}
+        # 设备侧回放流应答场景与 Dialog 状态。
+        self._playback_scenarios: dict[str, PlaybackScenario] = {}
         # 设备侧录像目录应答场景（RecordInfo）与响应统计。
         self._recordinfo_scenarios: dict[str, RecordInfoScenario] = {}
 
@@ -325,6 +334,13 @@ class DeviceSimulator:
                 if dialog.media_task is not None and not dialog.media_task.done():
                     dialog.media_task.cancel()
         self._live_scenarios.clear()
+        for scenario in self._playback_scenarios.values():
+            for dialog in scenario.dialogs.values():
+                if dialog.timeout_task is not None:
+                    dialog.timeout_task.cancel()
+                if dialog.media_task is not None and not dialog.media_task.done():
+                    dialog.media_task.cancel()
+        self._playback_scenarios.clear()
         self._recordinfo_scenarios.clear()
         self._devices.clear()
         self._known_ids.clear()
@@ -378,6 +394,8 @@ class DeviceSimulator:
             self._catalog_scenarios[device_id] = CatalogScenario(items=_default_catalog(device_id))
         if device_id not in self._live_scenarios:
             self._live_scenarios[device_id] = LiveScenario()
+        if device_id not in self._playback_scenarios:
+            self._playback_scenarios[device_id] = PlaybackScenario()
         if device_id not in self._recordinfo_scenarios:
             self._recordinfo_scenarios[device_id] = RecordInfoScenario()
 
@@ -471,8 +489,6 @@ class DeviceSimulator:
             return
         if method == "BYE":
             await self._handle_bye(device_id, msg, addr)
-            return
-        if method != "MESSAGE":
             return
         if await self._handle_catalog_query(device_id, msg, addr):
             return
@@ -675,20 +691,40 @@ class DeviceSimulator:
         return ""
 
     # ------------------------------------------------------------ 实时流信令（UAS）
+    # ------------------------------------------------------------ 实时流与回放信令（UAS）
+
+    def _select_signaling_scenario(
+        self, device_id: str, offer: Any
+    ) -> tuple[LiveScenario | PlaybackScenario, bool]:
+        """依据 SDP 中的 session_name 区分选择实时流还是回放流应答场景。"""
+        is_playback = getattr(offer, "session_name", "Play") == "Playback"
+        if is_playback:
+            pb_scenario = self._playback_scenarios.get(device_id)
+            if pb_scenario is None:
+                pb_scenario = PlaybackScenario()
+                self._playback_scenarios[device_id] = pb_scenario
+            return pb_scenario, True
+        live_scenario = self._live_scenarios.get(device_id)
+        if live_scenario is None:
+            live_scenario = LiveScenario()
+            self._live_scenarios[device_id] = live_scenario
+        return live_scenario, False
 
     async def _handle_invite(self, device_id: str, msg: SipMessage, addr: Any) -> None:
         """设备作为 UAS 处理 INVITE：按场景应答 SDP/200、486 或保持静默。"""
-        scenario = self._live_scenarios.get(device_id)
-        if scenario is None:
-            return
-        scenario.invites_received += 1
-        if scenario.mode == "drop":
-            return  # 静默：Provider 侧 INVITE 超时
         try:
             offer = parse_sdp(msg.body)
         except ValueError:
+            scenario, _ = self._select_signaling_scenario(device_id, None)
+            scenario.invites_received += 1
             scenario.last_error = "INVITE 缺少有效 SDP"
-            return  # 无有效 offer：Provider 侧超时
+            return
+
+        scenario, is_playback = self._select_signaling_scenario(device_id, offer)
+        logger.warning(f"_handle_invite: is_playback={is_playback}, mode={scenario.mode}")
+        scenario.invites_received += 1
+        if scenario.mode == "drop":
+            return  # 静默：Provider 侧 INVITE 超时
         if scenario.mode == "rejection":
             await self._send_invite_response(
                 device_id, msg, addr, status=scenario.reject_code, reason="Busy Here"
@@ -717,22 +753,35 @@ class DeviceSimulator:
             updated_at=utc_z_now(),
         )
         scenario.dialogs[call_id] = dialog
-        await self._send_invite_ok(device_id, msg, addr, dialog)
+        await self._send_invite_ok(
+            device_id, msg, addr, dialog, session_name="Playback" if is_playback else "Play"
+        )
         if scenario.mode == "no-ack":
             dialog.timeout_task = asyncio.create_task(
-                self._ack_timeout(device_id, call_id, scenario.ack_timeout)
+                self._ack_timeout(device_id, call_id, scenario.ack_timeout, is_playback=is_playback)
             )
 
     def _handle_ack(self, device_id: str, msg: SipMessage) -> None:
         """设备收到 ACK：Dialog 进入 ESTABLISHED；no-ack 场景模拟 ACK 丢失。"""
-        scenario = self._live_scenarios.get(device_id)
-        if scenario is None or scenario.mode == "no-ack":
-            return
         call_id = msg.header("call-id")
         if not call_id:
             return
-        dialog = scenario.dialogs.get(call_id)
-        if dialog is None or dialog.status != "WAITING_ACK":
+        # 优先在 Playback 寻找匹配 Dialog，其次 Live
+        scenario: LiveScenario | PlaybackScenario | None = None
+        dialog: DialogState | None = None
+        pb_sc = self._playback_scenarios.get(device_id)
+        if pb_sc and call_id in pb_sc.dialogs:
+            scenario = pb_sc
+            dialog = pb_sc.dialogs[call_id]
+        else:
+            live_sc = self._live_scenarios.get(device_id)
+            if live_sc and call_id in live_sc.dialogs:
+                scenario = live_sc
+                dialog = live_sc.dialogs[call_id]
+
+        if scenario is None or dialog is None or scenario.mode == "no-ack":
+            return
+        if dialog.status != "WAITING_ACK":
             return
         dialog.ack_received = True
         dialog.status = "ESTABLISHED"
@@ -745,7 +794,9 @@ class DeviceSimulator:
             and dialog.media_task is None
             and scenario.media_mode != "none"
         ):
-            dialog.media_task = asyncio.create_task(self._media_loop(device_id, dialog, scenario))
+            dialog.media_task = asyncio.get_running_loop().create_task(
+                self._media_loop(device_id, dialog, scenario)
+            )
 
     async def _media_loop(
         self, device_id: str, dialog: DialogState, scenario: LiveScenario
@@ -808,28 +859,36 @@ class DeviceSimulator:
 
     async def _handle_bye(self, device_id: str, msg: SipMessage, addr: Any) -> None:
         """设备收到 BYE：Dialog 进入 TERMINATED 并回 200。"""
-        scenario = self._live_scenarios.get(device_id)
-        if scenario is None:
-            return
         call_id = msg.header("call-id")
         if call_id:
-            dialog = scenario.dialogs.get(call_id)
-            if dialog is not None:
-                dialog.bye_received = True
-                dialog.status = "TERMINATED"
-                dialog.updated_at = utc_z_now()
-                if dialog.timeout_task is not None:
-                    dialog.timeout_task.cancel()
-                    dialog.timeout_task = None
-                if dialog.media_task is not None and not dialog.media_task.done():
-                    dialog.media_task.cancel()
-                    dialog.media_task = None
+            scenarios = [
+                self._playback_scenarios.get(device_id),
+                self._live_scenarios.get(device_id),
+            ]
+            for scenario in scenarios:
+                if scenario is not None and call_id in scenario.dialogs:
+                    dialog = scenario.dialogs[call_id]
+                    dialog.bye_received = True
+                    dialog.status = "TERMINATED"
+                    dialog.updated_at = utc_z_now()
+                    if dialog.timeout_task is not None:
+                        dialog.timeout_task.cancel()
+                        dialog.timeout_task = None
+                    if dialog.media_task is not None and not dialog.media_task.done():
+                        dialog.media_task.cancel()
+                        dialog.media_task = None
         await self._send_invite_response(device_id, msg, addr, status=200, reason="OK")
 
-    async def _ack_timeout(self, device_id: str, call_id: str, timeout: float) -> None:
+    async def _ack_timeout(
+        self, device_id: str, call_id: str, timeout: float, is_playback: bool = False
+    ) -> None:
         """no-ack 场景：200 后未收到 ACK，Dialog 以 FAILED 收敛。"""
         await asyncio.sleep(timeout)
-        scenario = self._live_scenarios.get(device_id)
+        scenario = (
+            self._playback_scenarios.get(device_id)
+            if is_playback
+            else self._live_scenarios.get(device_id)
+        )
         if scenario is None:
             return
         dialog = scenario.dialogs.get(call_id)
@@ -838,9 +897,20 @@ class DeviceSimulator:
             dialog.updated_at = utc_z_now()
 
     async def _send_invite_ok(
-        self, device_id: str, msg: SipMessage, addr: Any, dialog: DialogState
+        self,
+        device_id: str,
+        msg: SipMessage,
+        addr: Any,
+        dialog: DialogState,
+        session_name: str = "Play",
     ) -> None:
-        sdp = build_sdp_answer("127.0.0.1", dialog.media_port or 0, dialog.ssrc or "", "H264")
+        sdp = build_sdp_answer(
+            "127.0.0.1",
+            dialog.media_port or 0,
+            dialog.ssrc or "",
+            "H264",
+            session_name=session_name,
+        )
         await self._send_invite_response(
             device_id, msg, addr, status=200, reason="OK", to_tag=dialog.to_tag, body=sdp
         )
@@ -916,6 +986,53 @@ class DeviceSimulator:
         """设备实时流场景与 Dialog 诊断（控制面可查，脱敏视图）。"""
         self._require_known(device_id)
         scenario = self._live_scenarios[device_id]
+        return {
+            "externalDeviceId": device_id,
+            "mode": scenario.mode,
+            "delaySeconds": scenario.delay_seconds,
+            "rejectCode": scenario.reject_code,
+            "ackTimeoutSeconds": scenario.ack_timeout,
+            "mediaMode": scenario.media_mode,
+            "mediaLossRate": scenario.media_loss_rate,
+            "mediaStopAfterSeconds": scenario.media_stop_after_seconds,
+            "revision": str(scenario.revision),
+            "invitesReceived": scenario.invites_received,
+            "lastError": scenario.last_error,
+            "dialogs": [self._dialog_view(d) for d in scenario.dialogs.values()],
+        }
+
+    # ------------------------------------------------------------ 回放流控制面
+
+    def configure_playback(
+        self,
+        device_id: str,
+        *,
+        mode: str = "normal",
+        delay_seconds: float = 0.0,
+        reject_code: int = 486,
+        ack_timeout: float = 1.5,
+        media_mode: str = "normal",
+        media_loss_rate: float = 0.0,
+        media_stop_after_seconds: float = 0.0,
+    ) -> dict[str, Any]:
+        """安排设备回放流应答与媒体场景；每次安排 revision 递增。"""
+        self._require_known(device_id)
+        scenario = self._playback_scenarios[device_id]
+        scenario.mode = mode
+        scenario.delay_seconds = float(delay_seconds)
+        scenario.reject_code = int(reject_code)
+        scenario.ack_timeout = float(ack_timeout)
+        scenario.media_mode = media_mode
+        scenario.media_loss_rate = float(media_loss_rate)
+        scenario.media_stop_after_seconds = float(media_stop_after_seconds)
+        scenario.last_error = None
+        scenario.revision += 1
+        return self.playback_status(device_id)
+
+    def playback_status(self, device_id: str) -> dict[str, Any]:
+        """设备回放流场景与 Dialog 诊断（控制面可查，脱敏视图）。"""
+        self._require_known(device_id)
+        scenario = self._playback_scenarios[device_id]
         return {
             "externalDeviceId": device_id,
             "mode": scenario.mode,

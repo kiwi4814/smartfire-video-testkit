@@ -36,6 +36,10 @@
 - controlled ZLM integration smoke through real RTP packets: normal media, negotiated SSRC enforcement, no-media, wrong-SSRC, deterministic post-warmup frame loss, Stop cleanup and double-reset orphan cleanup; ZLM identifies H.264 directly from the PSM without its malformed-PS codec-guess fallback;
 - rejection and INVITE timeout converge the Provider live stream to FAILED (stable, observable via GET); no-ack leaves the device Dialog in a stable FAILED state with ackReceived=false;
 - repeated DELETE on a live stream is idempotent 204 and tears down the device Dialog via BYE; failed scenarios, reset and process teardown leave no Dialog, socket, RTP port or ZLM stream behind;
+- playback stream start establishes device-side Dialog via real SIP INVITE (`s=Playback`), SDP offer/answer, and sends deterministic H.264 RTP/PS media to ZLMediaKit; `s=Playback` SDP session name cleanly isolates Playback scenarios from Live scenarios;
+- playback error mapping validates `VIDEO_RECORD_NOT_FOUND` (404), `VIDEO_RECORD_MISMATCH` (409) for device/channel/time range mismatch, and `VIDEO_DEVICE_OFFLINE` (422);
+- playback scenario controls via `/testkit/v1/devices/{id}/playback` (normal, rejection 486, delayed, no-ack, drop, none, wrong-ssrc) with observable Dialog diagnostics and media stats;
+- playback media ZLM integration smoke proves stream-online transition to STREAMING, `rtp/{streamId}` media online, no-media/wrong-SSRC FAILED convergence, DELETE BYE teardown, and double-reset orphan RTP port cleanup;
 - machine-readable Provider Contract Bundle validation (version `1.0.0-draft.1`, SHA-256 integrity);
 - black-box Provider Conformance Runner (`video-testkit conformance` CLI subcommand) targeting arbitrary Base URL/token;
 - automated response envelope and payload Draft 2020-12 JSON Schema assertions against `openapi.yaml`;
@@ -54,18 +58,17 @@ uv run pytest
 uv build
 ```
 
-Current automated suite: 128 tests collected from sixteen behavior modules. Without ZLM configuration, 121 pass and the 7 controlled ZLM integration tests skip. With `VIDEO_TESTKIT_ZLM_API_URL` and `VIDEO_TESTKIT_ZLM_API_SECRET`, all 7 ZLM tests pass against real UDP RTP/PS transport. The suite also starts real HTTP and UDP listeners and exercises contract conformance, registration, Keepalive, Catalog, RecordInfo, live signaling and media lifecycle behavior.
+Current automated suite: 141 tests collected from eighteen behavior modules. Without ZLM configuration, 129 pass and the 12 controlled ZLM integration tests skip. With `VIDEO_TESTKIT_ZLM_API_URL` and `VIDEO_TESTKIT_ZLM_API_SECRET`, all 12 ZLM tests pass against real UDP RTP/PS transport. The suite also starts real HTTP and UDP listeners and exercises contract conformance, registration, Keepalive, Catalog, RecordInfo, live/playback signaling and media lifecycle behavior.
 
-Local verification on 2026-08-12: required quality gates and build passed (`121 passed, 7 skipped`); with ZLM variables enabled the full suite passed `128/128`.
+Local verification on 2026-08-12: required quality gates and build passed (`129 passed, 12 skipped`); with ZLM variables enabled the full suite passed `141/141`.
 
 ## Interpretation
 
-This baseline proves Simulator Conformance for deterministic UDP H.264 RTP/PS, deterministic device RecordInfo over real SIP MESSAGE and the controlled ZLMediaKit environment. It does not prove GB28181 certification, physical-camera interoperability, H.265/audio/TCP media, device playback media or production performance.
+This baseline proves Simulator Conformance for deterministic UDP H.264 RTP/PS, deterministic device RecordInfo over real SIP MESSAGE, deterministic device playback media over SIP/RTP/PS and the controlled ZLMediaKit environment. It does not prove GB28181 certification, physical-camera interoperability, H.265/audio/TCP media or production performance.
 
 ## Unimplemented boundaries
 
 - TCP SIP transport;
 - optional TCP/H.265/audio media scenarios;
-- device playback media (real RTP/PS playback; the Playback Stream mock interface already exists);
 - signed Provider event callbacks;
 - real-vendor compatibility matrix.

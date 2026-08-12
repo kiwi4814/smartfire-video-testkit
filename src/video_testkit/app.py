@@ -103,12 +103,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await simulator.stop_maintenance()
         simulator.close_listeners()
         if zlm_client is not None:
-            for stream in tuple(store.live_streams.values()):
+            all_streams = tuple(store.live_streams.values()) + tuple(
+                store.playback_streams.values()
+            )
+            for stream in all_streams:
                 if stream.media is None:
                     continue
                 with contextlib.suppress(ZlmError):
                     await zlm_client.close_rtp_server(str(stream.media["streamId"]))
-        if zlm_client is not None:
             await zlm_client.aclose()
         if registrar is not None:
             await registrar.stop()

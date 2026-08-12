@@ -22,6 +22,7 @@ class LiveRegistrar(Protocol):
         target: tuple[str, int],
         timeout: float,
         sdp_media: tuple[str, int] | None = None,
+        session_name: str = "Play",
     ) -> LiveDialog: ...
 
     async def send_bye(
@@ -43,11 +44,14 @@ class LiveClient:
         device_id: str,
         timeout: float,
         sdp_media: tuple[str, int] | None = None,
+        session_name: str = "Play",
     ) -> LiveDialog:
         target = self._simulator.device_listener_addr(device_id)
         if target is None:
             raise LiveInviteError(f"设备无监听地址: {device_id}")
-        return await self._registrar.invite_device(device_id, target, timeout, sdp_media=sdp_media)
+        return await self._registrar.invite_device(
+            device_id, target, timeout, sdp_media=sdp_media, session_name=session_name
+        )
 
     async def teardown(self, device_id: str, dialog: LiveDialog, timeout: float) -> None:
         target = self._simulator.device_listener_addr(device_id)

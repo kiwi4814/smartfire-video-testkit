@@ -222,7 +222,7 @@ def get_record_query(query_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.post("/playback-streams")
-def start_playback(
+async def start_playback(
     request: Request,
     body: PlaybackStartRequest,
     idem_key: str = Depends(require_idem_key),
@@ -241,7 +241,7 @@ def get_playback_stream(provider_stream_key: str, request: Request) -> dict[str,
 
 
 @router.delete("/playback-streams/{provider_stream_key}", status_code=204)
-def stop_playback_stream(provider_stream_key: str, request: Request) -> Response:
+async def stop_playback_stream(provider_stream_key: str, request: Request) -> Response:
     service = get_service(request)
     service.stop_playback_stream(provider_stream_key)
     return Response(status_code=204)

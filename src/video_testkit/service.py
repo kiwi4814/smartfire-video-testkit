@@ -603,11 +603,13 @@ class ProviderService:
             external_device_id=req.external_device_id,
             external_channel_id=req.external_channel_id,
             record_key=req.record_key,
-            state="STREAMING",
+            state="STARTING" if self.zlm_client is not None else "STREAMING",
             media={
-                "mediaServerId": "zlm-mock-01",
+                "mediaServerId": (
+                    "zlm-mock-01" if self.zlm_client is None else self.settings.zlm_media_server_id
+                ),
                 "vhost": "__defaultVhost__",
-                "app": "playback",
+                "app": "rtp" if self.zlm_client is not None else "playback",
                 "streamId": stream_id,
                 "codec": "H264",
                 "hasAudio": True,
@@ -620,7 +622,69 @@ class ProviderService:
         )
         self.store.playback_streams[key] = stream
         entry.resource_ref = key
+        # 后台经真实 SIP INVITE(s=Playback)/ACK 建立 Dialog；
+        # ZLM 模式下等待 stream-online 再收敛 STREAMING。
+        asyncio.get_running_loop().create_task(self._establish_playback_stream(stream))
         return stream, True
+
+    async def _establish_playback_stream(self, stream: PlaybackStreamState) -> None:
+        """后台：预留端口 → INVITE(s=Playback) → 按协商 SSRC 开 RTP → 等 online → STREAMING。
+
+        失败路径收敛 FAILED 并在 finally 中强制关闭 ZLM RTP 端口。
+        """
+        client = self.live_client
+        zlm = self.zlm_client
+        if client is None:
+            return  # registrar 关闭：保持 mock 行为
+        assert stream.media is not None
+        stream_id = str(stream.media["streamId"])
+        rtp_port: int | None = None
+        dialog: Any = None
+        try:
+            if zlm is not None:
+                rtp_port = zlm.next_rtp_port()
+            dialog = await client.establish(
+                stream.external_device_id,
+                timeout=self.settings.gb_live_invite_timeout,
+                sdp_media=(self.settings.zlm_rtp_host, rtp_port) if rtp_port else None,
+                session_name="Playback",
+            )
+            if zlm is not None:
+                await zlm.open_rtp_server(
+                    stream_id,
+                    port=rtp_port,
+                    ssrc=int(dialog.ssrc, 10) & 0xFFFFFFFF,
+                )
+                online = await zlm.wait_stream_online(
+                    stream_id, self.settings.zlm_stream_online_timeout
+                )
+                if not online:
+                    stream.state = "FAILED"
+                    logger.info(
+                        "playback stream no media",
+                        extra={"providerStreamKey": stream.provider_stream_key},
+                    )
+                    return
+                stream.state = "STREAMING"
+        except (LiveInviteError, TimeoutError, ZlmError) as exc:
+            stream.state = "FAILED"
+            logger.info(
+                "playback stream establish failed",
+                extra={"providerStreamKey": stream.provider_stream_key, "reason": str(exc)},
+            )
+            return
+        finally:
+            if zlm is not None and rtp_port is not None and stream.state != "STREAMING":
+                await zlm.close_rtp_server(stream_id)
+
+        if stream.state != "STREAMING":
+            if dialog is not None:
+                await client.teardown(
+                    stream.external_device_id, dialog, self.settings.gb_live_bye_timeout
+                )
+            return
+        client.attach_dialog(stream.provider_stream_key, dialog)
+        stream.state = "STREAMING"
 
     def get_playback_stream(self, key: str) -> PlaybackStreamState:
         stream = self.store.playback_streams.get(key)
@@ -635,9 +699,28 @@ class ProviderService:
     def stop_playback_stream(self, key: str) -> None:
         stream = self.store.playback_streams.pop(key, None)
         if stream is None:
-            return
+            return  # 幂等 204
         stream.state = "STOPPED"
         stream.stopped_at = now_utc()
+        client = self.live_client
+        if client is None:
+            return
+        dialog = client.dialog(key)
+        client.detach_dialog(key)
+        if dialog is not None:
+            asyncio.get_running_loop().create_task(self._teardown_playback_stream(stream, dialog))
+
+    async def _teardown_playback_stream(self, stream: PlaybackStreamState, dialog: Any) -> None:
+        client = self.live_client
+        zlm = self.zlm_client
+        if zlm is not None:
+            assert stream.media is not None
+            with contextlib.suppress(ZlmError):
+                await zlm.close_rtp_server(str(stream.media["streamId"]))
+        if client is not None:
+            await client.teardown(
+                stream.external_device_id, dialog, self.settings.gb_live_bye_timeout
+            )
 
     # ------------------------------------------------------------ 幂等
 

@@ -53,7 +53,7 @@ async def reset(request: Request) -> dict[str, Any]:
     store = get_store(request)
     zlm_stream_ids = [
         str(s.media["streamId"]) for s in store.live_streams.values() if s.media is not None
-    ]
+    ] + [str(s.media["streamId"]) for s in store.playback_streams.values() if s.media is not None]
     counts = service.reset()
     simulator = get_simulator(request)
     simulator.reset()
@@ -357,6 +357,51 @@ def live_status(external_device_id: str, request: Request) -> dict[str, Any]:
     service: ProviderService = get_service(request)
     service.require_device(external_device_id)
     return ok(get_request_id(request), simulator.live_status(external_device_id))
+
+
+class PlaybackBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mode: str = Field(default="normal")
+    delay_seconds: float = Field(default=0.0, ge=0, le=10)
+    reject_code: int = Field(default=486, ge=400, le=699)
+    ack_timeout_seconds: float = Field(default=1.5, gt=0, le=10, alias="ackTimeoutSeconds")
+    media_mode: str = Field(default="normal", alias="mediaMode")
+    media_loss_rate: float = Field(default=0.0, ge=0, lt=1, alias="mediaLossRate")
+    media_stop_after_seconds: float = Field(default=0.0, ge=0, le=60, alias="mediaStopAfterSeconds")
+
+
+@router.post("/devices/{external_device_id}/playback")
+def configure_playback(
+    external_device_id: str,
+    request: Request,
+    body: PlaybackBody,
+) -> dict[str, Any]:
+    """安排设备回放流应答场景（normal/rejection/delayed/no-ack/drop）。"""
+    simulator = get_simulator(request)
+    service: ProviderService = get_service(request)
+    service.require_device(external_device_id)
+    simulator.set_known_device(external_device_id)
+    view = simulator.configure_playback(
+        external_device_id,
+        mode=body.mode,
+        delay_seconds=body.delay_seconds,
+        reject_code=body.reject_code,
+        ack_timeout=body.ack_timeout_seconds,
+        media_mode=body.media_mode,
+        media_loss_rate=body.media_loss_rate,
+        media_stop_after_seconds=body.media_stop_after_seconds,
+    )
+    return ok(get_request_id(request), view)
+
+
+@router.get("/devices/{external_device_id}/playback")
+def playback_status(external_device_id: str, request: Request) -> dict[str, Any]:
+    """查看设备回放流场景与 Dialog 脱敏诊断。"""
+    simulator = get_simulator(request)
+    service: ProviderService = get_service(request)
+    service.require_device(external_device_id)
+    return ok(get_request_id(request), simulator.playback_status(external_device_id))
 
 
 @router.get("/devices/{external_device_id}/status")

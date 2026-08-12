@@ -23,7 +23,7 @@ SmartFire 视频测试套件：**Fake Video Provider** + **GB28181 Device Simula
 - `POST /devices/{id}/catalog-syncs` + `GET /catalog-syncs/{operationId}`（异步操作机；通过真实 SIP Catalog 查询发现目录，SUCCEEDED/PARTIAL 含 discoveredCount，非破坏性 reconcile）
 - `POST/GET/DELETE /live-streams`（复用返回 200、新建返回 201、DELETE 幂等 204；未配置 ZLM 时保持 Fake Provider 即时 `STREAMING`，配置 ZLM 时先返回 `STARTING`，经真实 SIP INVITE/ACK 和 RTP/PS 到达 ZLM 后才收敛为 `STREAMING`）
 - `POST/GET /device-record-queries`（异步操作机；通过真实 SIP RecordInfo 查询设备录像目录，SUCCEEDED/PARTIAL/FAILED，空窗口成功返回空 items，recordKey 稳定不透明且绑定左闭右开区间）
-- `POST/GET/DELETE /playback-streams`（`recordKey` 优先，`VIDEO_RECORD_MISMATCH` 校验）
+- `POST/GET/DELETE /playback-streams`（复用 200、新建 201、DELETE 幂等 204；经 `s=Playback` SIP INVITE/ACK 和 RTP/PS 推流到达 ZLM 收敛为 `STREAMING`；mismatch / not_found 错误校验）
 - 统一 envelope `{requestId, data}` / `{requestId, error}`、稳定错误码、`Idempotency-Key`（缺失 400、复用冲突 409）
 - Provider 事件 outbox（CATALOG_CHANGED 等）+ 可选回调投递（httpx，有界重试）
 
@@ -35,7 +35,7 @@ SmartFire 视频测试套件：**Fake Video Provider** + **GB28181 Device Simula
 - 内置 Fake SIP Registrar（UDP）：请求日志与注册表可通过控制面查看；Provider 侧可向设备发起 Catalog 查询并聚合多消息响应
 - 设备常驻 UDP 监听：接收 Provider 的 Catalog 查询 MESSAGE，按可编排场景响应（normal/multi/duplicate/delayed/missing/malformed/out-of-order/timeout，`POST/GET /devices/{id}/catalog`）
 - 设备侧录像目录（RecordInfo）：响应 Provider 的 RecordInfo 查询 MESSAGE，按可编排场景返回录像 XML（normal/multi/duplicate/delayed/missing/out-of-order/timeout/empty，`POST/GET /devices/{id}/recordinfo`，支持 `timeOffsetSeconds` 控制设备本地时间偏移）
-- 设备侧实时流 UAS：INVITE/SDP/200/ACK/BYE Dialog 生命周期，按场景应答并通过 UDP 发送确定性 H.264 RTP/PS（normal/no-media/wrong-ssrc/lossy/stop-after）；Dialog、SSRC、媒体目标与发送统计经 `/testkit/v1` 脱敏诊断观察
+- 设备侧实时流与回放流 UAS：INVITE(`s=Play`/`s=Playback`)/SDP/200/ACK/BYE Dialog 生命周期，按独立场景应答（`POST/GET /devices/{id}/live` 与 `POST/GET /devices/{id}/playback`）并通过 UDP 发送确定性 H.264 RTP/PS（normal/no-media/wrong-ssrc/lossy/stop-after）；Dialog、SSRC、媒体目标与发送统计经 `/testkit/v1` 脱敏诊断观察
 - 设备在线状态注入（`POST /devices/{id}/status`）、就绪状态注入（`POST /ready`）
 
 **未实现（后续切片）**：H.265/TCP/音频媒体、

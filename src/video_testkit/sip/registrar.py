@@ -626,6 +626,7 @@ class SipRegistrar:
         target: tuple[str, int],
         timeout: float,
         sdp_media: tuple[str, int] | None = None,
+        session_name: str = "Play",
     ) -> LiveDialog:
         """向设备发送 INVITE（SDP offer），2xx 后发 ACK 并返回 Dialog。
 
@@ -644,7 +645,7 @@ class SipRegistrar:
         media_port = 30000 + (self._uac_cseq * 37) % 1000
         if sdp_media is not None:
             media_ip, media_port = sdp_media
-        body = build_sdp_offer(media_ip, media_port, ssrc, "H264")
+        body = build_sdp_offer(media_ip, media_port, ssrc, "H264", session_name=session_name)
 
         future: asyncio.Future[tuple[int, SipMessage]] = loop.create_future()
         self._uac_sessions[branch] = _UacSession("INVITE", future)

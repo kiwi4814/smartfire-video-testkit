@@ -20,15 +20,18 @@ class SdpData:
     codecs: tuple[str, ...]
     sendonly: bool = False
     recvonly: bool = False
+    session_name: str = "Play"
 
 
-def build_sdp_offer(media_ip: str, media_port: int, ssrc: str, codec: str) -> str:
+def build_sdp_offer(
+    media_ip: str, media_port: int, ssrc: str, codec: str, session_name: str = "Play"
+) -> str:
     """构造 Provider（UAC）→ 设备 的 SDP offer（recvonly，等待设备推流）。"""
     return "\r\n".join(
         [
             "v=0",
             f"o=34020000002000000001 0 0 IN IP4 {media_ip}",
-            "s=Play",
+            f"s={session_name}",
             f"c=IN IP4 {media_ip}",
             "t=0 0",
             f"m=video {media_port} RTP/AVP 96 98 97",
@@ -42,13 +45,15 @@ def build_sdp_offer(media_ip: str, media_port: int, ssrc: str, codec: str) -> st
     )
 
 
-def build_sdp_answer(media_ip: str, media_port: int, ssrc: str, codec: str) -> str:
+def build_sdp_answer(
+    media_ip: str, media_port: int, ssrc: str, codec: str, session_name: str = "Play"
+) -> str:
     """构造设备（UAS）→ Provider 的 SDP answer（sendonly，设备侧推流端点）。"""
     return "\r\n".join(
         [
             "v=0",
             f"o=34020000001320000001 0 0 IN IP4 {media_ip}",
-            "s=Play",
+            f"s={session_name}",
             f"c=IN IP4 {media_ip}",
             "t=0 0",
             f"m=video {media_port} RTP/AVP 96 98 97",
@@ -70,7 +75,7 @@ def parse_sdp(body: str) -> SdpData:
     ssrc: str | None = None
     sendonly = False
     recvonly = False
-
+    session_name = "Play"
     for raw_line in body.splitlines():
         line = raw_line.strip()
         if not line or "=" not in line:
@@ -78,7 +83,9 @@ def parse_sdp(body: str) -> SdpData:
         field, _, value = line.partition("=")
         field = field.strip()
         value = value.strip()
-        if field == "c" and value.lower().startswith("in ip4"):
+        if field == "s":
+            session_name = value
+        elif field == "c" and value.lower().startswith("in ip4"):
             connect_address = value.split()[-1]
         elif field == "m":
             parts = value.split()
@@ -104,4 +111,5 @@ def parse_sdp(body: str) -> SdpData:
         codecs=tuple(dict.fromkeys(codecs)),
         sendonly=sendonly,
         recvonly=recvonly,
+        session_name=session_name,
     )
