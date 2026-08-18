@@ -74,6 +74,22 @@ video-testkit --port 8000
 - 控制面：`http://127.0.0.1:8000/testkit/v1/`
 - 内置 Registrar：UDP `127.0.0.1:15060`（仅环回）
 
+## 外部 WVP Provider 验收
+
+本仓库没有 `justfile`；TestKit 的开发、单元测试和外部控制面均使用 `uv`。内置 Fake Provider 的 `/provider/v1` 测试与外部 WVP Provider 验收是不同路径，前者不能证明 WVP 的 SIP、PostgreSQL 或 ZLMediaKit 行为。
+
+外部 WVP 验收前置条件：
+
+1. 单独启动 WVP Provider、TestKit 和受控 ZLMediaKit；确保 TestKit 控制面、WVP HTTP/SIP 和 ZLM RTP 端口没有上一轮残留进程占用。
+2. 将 `VIDEO_TESTKIT_GB_REGISTRAR_ADDR` 指向 WVP SIP 地址，并使 `VIDEO_TESTKIT_GB_PASSWORD` 与 WVP 的 `SMARTFIRE_WVP_SIP_PASSWORD` 一致；密码只从各自本地未跟踪环境读取。
+3. 通过 `POST /testkit/v1/devices/{deviceId}/register` 触发 REGISTER，轮询状态确认注册成功。
+4. 通过 `POST /testkit/v1/devices/{deviceId}/keepalive/start` 启动 Keepalive，确认 WVP 设备状态为 `ONLINE`。
+5. 设备在线后再触发 WVP Catalog sync；随后才运行 VT-05、VT-06 或 `video-testkit conformance`。
+
+`POST /testkit/v1/reset` 只清理 TestKit 模拟器、Dialog、编排场景和 callback sink，不会清理 WVP PostgreSQL 技术投影、WVP Redis、Flyway 历史或 ZLM 媒体。WVP 的 `just verify-infrastructure` clean gate 必须在 TestKit REGISTER 之前执行；如果验收已经写入 `wvp_device`，应使用隔离数据库或经过授权的 WVP 技术投影清理，不要把 reset 当成数据库清理。
+
+外部 Contract Runner 只验证被测 Provider 的公共 HTTP seam，不会替 Provider 完成 REGISTER、Keepalive 或 Catalog。每轮结束后停止 TestKit/WVP，并用 ZLM `getMediaList` 确认没有残留流；手工调用 Provider WebHook 只能证明 WebHook seam 的处理逻辑，不能证明 ZLM 自动回调已配置。
+
 ## 环境变量（前缀 `VIDEO_TESTKIT_`）
 
 | 变量 | 默认 | 说明 |

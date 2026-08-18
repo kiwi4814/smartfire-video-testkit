@@ -80,3 +80,11 @@ curl -s "$BASE/index/api/closeRtpServer?secret=$SECRET&stream_id=probe"         
 
 - 单元测试**不依赖** ZLM；媒体到达/清理冒烟仅在 `ZLM_API_URL` 显式配置时启用。
 - secret 为本地开发生成值；任何共享/生产环境必须轮换。
+
+## 外部 WVP 验收的证据边界
+
+- `openRtpServer` 只证明 ZLM 已分配接收端口；只有收到实际 RTP/PS 后，`getMediaList` 才会出现 `app/stream = rtp/{stream_id}`，这才是 Provider `STARTING -> STREAMING` 的媒体在线证据。
+- VT-06 的 `getMediaList`、RTP 统计和最终无残留流证据，不能替代 SIP INVITE/ACK/BYE 或 WVP Provider Stream 生命周期证据；各层必须分别记录。
+- 直接 POST WVP `/internal/zlm/hook/*` 只能验证 Provider WebHook 的认证、解析和清理 seam。只有在 ZLM 配置真实 hook URL/secret 后，观察到 ZLM 自动发出的回调，才能声称自动 WebHook 路由已验证。
+- WVP hook 使用的 secret、ZLM API secret 和地址只从本地未跟踪配置读取。ZLM API 的 secret 放在 query 参数中；不要用 `curl --data-urlencode` 把它误放到请求体。
+- 每轮 WVP/TestKit 验收后，先停止双方进程，再调用 `getMediaList`、关闭未完成的 RTP server，并确认没有 orphan stream；否则下一轮可能先失败于端口占用或残留媒体。
