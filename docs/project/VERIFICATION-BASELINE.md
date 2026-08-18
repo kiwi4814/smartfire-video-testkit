@@ -75,6 +75,22 @@ Current automated suite: 173 tests collected from behavior modules. Without ZLM 
 
 Local verification on 2026-08-12: required quality gates and build passed (`173 passed, 12 skipped`); with ZLM variables enabled the full suite passed `185/185`.
 
+## External WVP WP-12 release-gate verification (2026-08-18)
+
+On 2026-08-18, the TestKit Conformance Runner (`video-testkit conformance`) and Callback Sink were reused as the authoritative release gate for the external `smartfire-wvp-provider` WP-12 final milestone.
+
+The release gate executed three consecutive clean runs (`--runs 3`) under `target/conformance-reports-wp12-final-20260818-logging/`:
+- **Run IDs**: `run-68cb6c022ce5` (run-1), `run-8cdae39dab4d` (run-2), `run-bb815f6b14a7` (run-3);
+- **Contract Bundle**: version `1.0.0-draft.1`, SHA-256 `5d4b9a19fd7037c010375541c9966d5f546a85d53293a0ed453e51bf5b8a4325`;
+- **Per-run summary**: 17 total, 14 passed, 0 failed, 3 capability-gated skipped;
+- **Mandatory suite**: 10 total, 10 passed, 0 failed, 0 skipped (10/10);
+- **Capability-gated skips**: `CATALOG_SYNC` (CT-DEV-004) and `DEVICE_RECORD_PLAYBACK` (CT-REC-002, CT-REC-006) skipped cleanly as declared unsupported provider capabilities;
+- **Callback sink & reconciliation observation**: verified Outbox callback delivery with the TestKit sink (2xx ack, 500 bounded exponential retry retaining `eventId`, 401 terminal `no retry`, restart epoch rollover ordering), and full inventory reconcile handling expired snapshot tokens (`409 VIDEO_CATALOG_SNAPSHOT_EXPIRED`) without false MISSING conclusions;
+- **Teardown observation**: confirmed post-run cleanup with zero active dialogs, RTP servers, orphan streams, or socket leaks in ZLMediaKit;
+- **Interpretation & boundary**: all three reports concluded with exact Simulator Conformance ("Simulator Conformance: the Provider satisfies the machine-readable contract as observed through the public HTTP seams. This does not imply Vendor Compatibility with any real camera, GB28181 gateway or platform.").
+
+This entry documents external downstream integration evidence confirming conformance runner stability and report generation in a multi-run packaging gate; it represents external WVP integration evidence and does not modify the TestKit implementation baseline or constitute a physical Vendor Compatibility claim.
+
 ## Interpretation
 
 This baseline proves Simulator Conformance for deterministic UDP H.264 RTP/PS, deterministic device RecordInfo over real SIP MESSAGE, deterministic device playback media over SIP/RTP/PS, the VT-09 optional capability pack (H.265, G.711A audio, SIP over TCP, RTP over TCP), Provider event delivery through the callback sink with epoch-aware revisions and bounded retry semantics, inventory snapshotToken reconciliation, and the controlled ZLMediaKit environment. It does not prove GB28181 certification, physical-camera interoperability, real-vendor compatibility or production performance.
