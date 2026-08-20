@@ -76,6 +76,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     stop_event = asyncio.Event()
     worker = EventsDeliveryWorker(store, settings, app.state)
+    app.state.events_delivery_worker = worker
     worker_task = asyncio.create_task(worker.run(stop_event))
     simulator.start_maintenance()
     timeout_task = asyncio.create_task(_keepalive_timeout_loop(service, settings, stop_event))

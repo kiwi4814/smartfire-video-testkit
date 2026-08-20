@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -62,6 +64,13 @@ class EventsDeliveryWorker:
         self._store = store
         self._settings = settings
         self._dynamic = dynamic_config
+        self._delivery_lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def pause_delivery(self) -> AsyncIterator[None]:
+        """暂停新投递并等待在途投递结束，供 reset 原子清理可复位状态。"""
+        async with self._delivery_lock:
+            yield
 
     def _callback_url(self) -> str | None:
         if self._dynamic is not None and getattr(self._dynamic, "events_callback_url", None):
@@ -84,6 +93,10 @@ class EventsDeliveryWorker:
                     pass
 
     async def _deliver_pending(self, client: httpx.AsyncClient) -> None:
+        async with self._delivery_lock:
+            await self._deliver_pending_locked(client)
+
+    async def _deliver_pending_locked(self, client: httpx.AsyncClient) -> None:
         url = self._callback_url()
         token = self._callback_token()
         auth_headers = {"Authorization": f"Bearer {token}"} if token else {}
@@ -91,6 +104,8 @@ class EventsDeliveryWorker:
             if event.delivery_state == "DELIVERED":
                 continue
             if event.delivery_state == "NOT_CONFIGURED":
+                continue
+            if event.delivery_state == "FAILED" and "(no retry)" in (event.last_error or ""):
                 continue
             if url is None:
                 event.delivery_state = "NOT_CONFIGURED"

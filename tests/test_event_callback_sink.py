@@ -134,7 +134,11 @@ def test_401_script_no_retry(client: httpx.Client) -> None:
         evs = _provider_events(client)
         return evs[0] if evs else {}
 
-    wait_until_value(lambda: ev().get("attempts", 0), lambda n: n >= 1, timeout=6.0)
+    wait_until_value(
+        lambda: ev().get("lastError") or "",
+        lambda error: "no retry" in error,
+        timeout=6.0,
+    )
     # 稳定窗口内不再重试（401/403 不盲目重试）
     assert ev()["attempts"] == 1
     assert "no retry" in (ev()["lastError"] or "")
@@ -208,6 +212,14 @@ def test_reset_clears_sink_state(client: httpx.Client) -> None:
     assert status["received"] == 0
     assert status["scriptStatus"] is None
     assert _provider_events(client) == []
+
+    client.post(f"/testkit/v1/devices/{NVR}/status", json={"onlineStatus": "OFFLINE"})
+    wait_until_value(
+        lambda: _provider_events(client)[0]["deliveryState"],
+        lambda state: state == "NOT_CONFIGURED",
+        timeout=6.0,
+    )
+    assert _sink_received(client) == []
 
 
 def test_epoch_present_in_info_and_events(client: httpx.Client) -> None:

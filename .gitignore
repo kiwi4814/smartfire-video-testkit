@@ -12,3 +12,5 @@ build/
 # Local planning and execution records
 /.scratch/
 .zlm/
+.testkit-wvp.env
+*.env

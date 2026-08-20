@@ -4,8 +4,8 @@
 
 - TestKit version: `0.1.0`
 - Provider Contract: `1.0.0-draft.1`
-- Verified on: 2026-08-12
-- Python used for the current environment: 3.13 (full suite also green on 3.11)
+- Verified on: 2026-08-20
+- Python used for the current environment: 3.11 (prior baseline also green on 3.13)
 - Declared minimum Python: 3.11
 
 ## Verified behavior
@@ -71,9 +71,18 @@ uv run pytest
 uv build
 ```
 
-Current automated suite: 173 tests collected from behavior modules. Without ZLM configuration, 173 pass and the 12 controlled ZLM integration tests skip. With `VIDEO_TESTKIT_ZLM_API_URL` and `VIDEO_TESTKIT_ZLM_API_SECRET`, all 12 ZLM tests pass against real UDP RTP/PS transport (TCP-media ZLM smoke additionally requires a ZLM configured with TCP passive mode). The suite also starts real HTTP, UDP and TCP listeners and exercises contract conformance, registration, Keepalive, Catalog, RecordInfo, live/playback signaling, media lifecycle, Provider event callback delivery, inventory reconciliation and release-grade report generation behavior.
+Current automated suite: 185 tests collected from behavior modules. Without ZLM configuration, 173 pass and the 12 controlled ZLM integration tests skip. With `VIDEO_TESTKIT_ZLM_API_URL` and `VIDEO_TESTKIT_ZLM_API_SECRET`, all 185 tests can run against the controlled ZLM environment (TCP-media ZLM smoke additionally requires a ZLM configured with TCP passive mode). The suite also starts real HTTP, UDP and TCP listeners and exercises contract conformance, registration, Keepalive, Catalog, RecordInfo, live/playback signaling, media lifecycle, Provider event callback delivery, inventory reconciliation and release-grade report generation behavior.
 
 Local verification on 2026-08-12: required quality gates and build passed (`173 passed, 12 skipped`); with ZLM variables enabled the full suite passed `185/185`.
+
+## Callback delivery and reset stability verification (2026-08-20)
+
+- A release review reproduced `test_401_script_no_retry` with `attempts=2` after four clean full-suite runs. The worker marked 401/403 as `no retry` but did not skip that terminal event on its next polling cycle.
+- The delivery worker now treats the existing `no retry` marker as terminal. The public HTTP regression waits until that terminal result is observable before asserting `attempts=1`; retryable 5xx behavior and the public event shape are unchanged.
+- The same review also reproduced an in-flight callback arriving after `/testkit/v1/reset` had cleared the sink. Reset now pauses delivery, waits for an in-flight request, and atomically clears the outbox, sink and dynamic callback configuration before returning.
+- The focused 401 and reset scenarios each passed in 20 independent Pytest processes (40 focused executions total).
+- Three consecutive complete runs passed with `173 passed, 12 skipped` in each run.
+- `uv sync --locked`, Ruff, format check, Mypy and `uv build` all passed; the build produced both the source distribution and wheel.
 
 ## External WVP WP-12 release-gate verification (2026-08-18)
 

@@ -12,6 +12,7 @@ from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from video_testkit.errors import ErrorCode, provider_error
+from video_testkit.events import EventsDeliveryWorker
 from video_testkit.provider_api import get_request_id, get_service, ok
 from video_testkit.scenario import scenario_summary
 from video_testkit.service import ProviderService
@@ -51,28 +52,38 @@ def get_registrar(request: Request) -> SipRegistrar | None:
 async def reset(request: Request) -> dict[str, Any]:
     service = get_service(request)
     store = get_store(request)
-    zlm_stream_ids = [
-        str(s.media["streamId"]) for s in store.live_streams.values() if s.media is not None
-    ] + [str(s.media["streamId"]) for s in store.playback_streams.values() if s.media is not None]
-    counts = service.reset()
-    simulator = get_simulator(request)
-    simulator.reset()
-    for device_id in get_store(request).devices:
-        simulator.set_known_device(device_id)
-    await simulator.ensure_all_listeners()  # 同步重建常驻监听（新端口），reset 返回即可查询
-    registrar = get_registrar(request)
-    if registrar is not None:
-        registrar.reset()
-    # VT-11：清理 Callback Sink 接收状态与脚本（不停止监听）。
-    sink = getattr(request.app.state, "callback_sink", None)
-    if sink is not None:
-        sink.reset()
-    # 强制关闭本场景遗留的 ZLM RTP 端口/流（幂等；重复 reset 不影响其他场景）。
-    zlm = service.zlm_client
-    if zlm is not None:
-        for stream_id in zlm_stream_ids:
-            with contextlib.suppress(ZlmError):
-                await zlm.close_rtp_server(stream_id)
+    worker = cast(EventsDeliveryWorker, request.app.state.events_delivery_worker)
+    async with worker.pause_delivery():
+        zlm_stream_ids = [
+            str(s.media["streamId"]) for s in store.live_streams.values() if s.media is not None
+        ] + [
+            str(s.media["streamId"]) for s in store.playback_streams.values() if s.media is not None
+        ]
+        counts = service.reset()
+        simulator = get_simulator(request)
+        simulator.reset()
+        for device_id in get_store(request).devices:
+            simulator.set_known_device(device_id)
+        await simulator.ensure_all_listeners()  # 同步重建常驻监听（新端口），reset 返回即可查询
+        registrar = get_registrar(request)
+        if registrar is not None:
+            registrar.reset()
+        # VT-11：清理 Callback Sink 及动态投递配置，reset 返回后不再接收旧事件。
+        sink = getattr(request.app.state, "callback_sink", None)
+        if sink is not None:
+            sink.reset()
+        settings = request.app.state.settings
+        request.app.state.events_callback_url = settings.events_callback_url
+        request.app.state.events_callback_token = settings.events_callback_token
+        request.app.state.callback_sink_token = (
+            settings.events_callback_token or "testkit-sink-token"
+        )
+        # 强制关闭本场景遗留的 ZLM RTP 端口/流（幂等；重复 reset 不影响其他场景）。
+        zlm = service.zlm_client
+        if zlm is not None:
+            for stream_id in zlm_stream_ids:
+                with contextlib.suppress(ZlmError):
+                    await zlm.close_rtp_server(stream_id)
     return ok(get_request_id(request), {"status": "RESET", **counts})
 
 
