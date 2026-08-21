@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import logging
 import secrets
+import socket
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -166,12 +167,475 @@ DEFAULT_IPC_CATALOG = [
 ]
 
 
+DEFAULT_0003_CATALOG = [
+    CatalogItemData(
+        "34020000001310000022",
+        "总部消控室在岗检测枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000023",
+        "总部电梯厅电瓶车检测枪机A",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000024",
+        "总部电梯厅电瓶车检测枪机B",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000025",
+        "总部疏散通道消防枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000026",
+        "总部地下车库热成像球机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1280x720",
+        "H264",
+        False,
+        True,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000027",
+        "总部屋面高空瞭望鹰眼",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        True,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000028",
+        "总部大堂全景枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+]
+
+DEFAULT_0004_CATALOG = [
+    CatalogItemData(
+        "34020000001310000029",
+        "研发楼电梯厅电瓶车检测枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000030",
+        "研发楼疏散通道枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000031",
+        "研发楼地下车库热成像球机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1280x720",
+        "H264",
+        False,
+        True,
+        True,
+    ),
+]
+
+DEFAULT_0005_CATALOG = [
+    CatalogItemData(
+        "34020000001310000032",
+        "一号厂房明火烟雾检测枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000033",
+        "一号厂房配电间热成像仪",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1280x720",
+        "H264",
+        False,
+        True,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000034",
+        "一号厂房消防通道占用枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+]
+
+DEFAULT_0006_CATALOG = [
+    CatalogItemData(
+        "34020000001310000035",
+        "二号厂房明火烟雾检测枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000036",
+        "二号厂房配电间热成像仪",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1280x720",
+        "H264",
+        False,
+        True,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000037",
+        "二号厂房装配区行为分析枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+]
+
+DEFAULT_0007_CATALOG = [
+    CatalogItemData(
+        "34020000001310000038",
+        "综合仓储堆垛热成像云台",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1280x720",
+        "H264",
+        False,
+        True,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000039",
+        "综合仓储消防通道占用枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000040",
+        "综合仓储卸货区全景枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+]
+
+DEFAULT_0008_CATALOG = [
+    CatalogItemData(
+        "34020000001310000041",
+        "成品仓储堆垛热成像云台",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1280x720",
+        "H264",
+        False,
+        True,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000042",
+        "成品仓储消防疏散通道枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+]
+
+DEFAULT_0009_CATALOG = [
+    CatalogItemData(
+        "34020000001310000043",
+        "消防水泵房巡检枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000044",
+        "高压配电室热成像仪",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1280x720",
+        "H264",
+        False,
+        True,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000045",
+        "消防泵房明火检测枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+]
+
+DEFAULT_0010_CATALOG = [
+    CatalogItemData(
+        "34020000001310000046",
+        "园区西门出入口枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000047",
+        "消防车通道占用检测枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+]
+
+DEFAULT_0011_CATALOG = [
+    CatalogItemData(
+        "34020000001310000048",
+        "高位仓储堆垛热成像云台",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1280x720",
+        "H264",
+        False,
+        True,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000049",
+        "高位仓储消防通道占用枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+    CatalogItemData(
+        "34020000001310000050",
+        "高位仓储顶棚高空瞭望",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        True,
+        True,
+    ),
+]
+
+DEFAULT_0012_CATALOG = [
+    CatalogItemData(
+        "34020000001310000051",
+        "分拨作业区全景枪机",
+        "HIKVISION",
+        "CH-MOCK-1080P",
+        "ON",
+        0,
+        0,
+        "1920x1080",
+        "H264",
+        False,
+        False,
+        True,
+    ),
+]
+
+
 def _default_catalog(device_id: str) -> list[CatalogItemData]:
     if device_id == "34020000001320000001":
         return list(DEFAULT_NVR_CATALOG)
     if device_id == "34020000001320000002":
         return list(DEFAULT_IPC_CATALOG)
-    return []
+    mapping = {
+        "34020000001320000003": DEFAULT_0003_CATALOG,
+        "34020000001320000004": DEFAULT_0004_CATALOG,
+        "34020000001320000005": DEFAULT_0005_CATALOG,
+        "34020000001320000006": DEFAULT_0006_CATALOG,
+        "34020000001320000007": DEFAULT_0007_CATALOG,
+        "34020000001320000008": DEFAULT_0008_CATALOG,
+        "34020000001320000009": DEFAULT_0009_CATALOG,
+        "34020000001320000010": DEFAULT_0010_CATALOG,
+        "34020000001320000011": DEFAULT_0011_CATALOG,
+        "34020000001320000012": DEFAULT_0012_CATALOG,
+    }
+    return list(mapping[device_id]) if device_id in mapping else []
 
 
 @dataclass
@@ -423,7 +887,7 @@ class DeviceSimulator:
             return
         loop = asyncio.get_running_loop()
         _, protocol = await loop.create_datagram_endpoint(
-            lambda: _ListenerProtocol(self, device_id), local_addr=("127.0.0.1", 0)
+            lambda: _ListenerProtocol(self, device_id), local_addr=("0.0.0.0", 0)
         )
         self._listeners[device_id] = protocol
 
@@ -441,7 +905,7 @@ class DeviceSimulator:
             return
         server = await asyncio.start_server(
             lambda reader, writer: self._handle_tcp_connection(device_id, reader, writer),
-            "127.0.0.1",
+            "0.0.0.0",
             0,
         )
         self._tcp_servers[device_id] = server
@@ -1081,7 +1545,7 @@ class DeviceSimulator:
         reply: ReplySink = None,
     ) -> None:
         sdp = build_sdp_answer(
-            "127.0.0.1",
+            self._settings.gb_advertise_ip,
             dialog.media_port or 0,
             dialog.ssrc or "",
             codec,
@@ -1363,8 +1827,8 @@ class DeviceSimulator:
         msg = build_message(
             f"MESSAGE {uri} SIP/2.0",
             [
-                ("Via", f"SIP/2.0/UDP 127.0.0.1:{local_port};branch={branch};rport"),
-                ("From", f"<sip:{device_id}@127.0.0.1:{local_port}>;tag={uuid.uuid4().hex[:12]}"),
+                ("Via", f"SIP/2.0/UDP {self._settings.gb_advertise_ip}:{local_port};branch={branch};rport"),
+                ("From", f"<sip:{device_id}@{self._settings.gb_advertise_ip}:{local_port}>;tag={uuid.uuid4().hex[:12]}"),
                 ("To", f"<{uri}>"),
                 ("Call-ID", uuid.uuid4().hex),
                 ("CSeq", f"{self._catalog_cseq[device_id]} MESSAGE"),
@@ -1425,7 +1889,7 @@ class DeviceSimulator:
         state.last_keepalive_error = None
 
         timeout = self._settings.gb_register_timeout
-        reg_host, reg_port = self._split_addr(self._settings.effective_gb_registrar_addr)
+        reg_host, reg_port = await self._resolve_registrar()
         uri = f"sip:{device_id}@{reg_host}:{reg_port}"
         try:
             status_code = await self._keepalive_trip(
@@ -1483,7 +1947,7 @@ class DeviceSimulator:
     ) -> int:
         loop = asyncio.get_running_loop()
         transport, protocol = await loop.create_datagram_endpoint(
-            _ClientProtocol, local_addr=("127.0.0.1", 0)
+            _ClientProtocol, local_addr=("0.0.0.0", 0)
         )
         try:
             local_port = transport.get_extra_info("sockname")[1]
@@ -1514,7 +1978,7 @@ class DeviceSimulator:
 
         body = "NOT-VALID-XML{{{" if malformed else build_keepalive_xml(device_id, sn)
         headers: list[tuple[str, str]] = [
-            ("Via", f"SIP/2.0/UDP 127.0.0.1:{local_port};branch={branch};rport"),
+            ("Via", f"SIP/2.0/UDP {self._settings.gb_advertise_ip}:{local_port};branch={branch};rport"),
             ("From", f"<{uri}>;tag={uuid.uuid4().hex[:12]}"),
             ("To", f"<{uri}>"),
             ("Call-ID", uuid.uuid4().hex),
@@ -1580,7 +2044,7 @@ class DeviceSimulator:
         state.attempt_count += 1
 
         timeout = self._settings.gb_register_timeout
-        reg_host, reg_port = self._split_addr(self._settings.effective_gb_registrar_addr)
+        reg_host, reg_port = await self._resolve_registrar()
         uri = f"sip:{device_id}@{reg_host}:{reg_port}"
         try:
             await self._register_flow(device_id, uri, (reg_host, reg_port), timeout, state)
@@ -1606,7 +2070,7 @@ class DeviceSimulator:
         state.attempt_count += 1
 
         timeout = self._settings.gb_register_timeout
-        reg_host, reg_port = self._split_addr(self._settings.effective_gb_registrar_addr)
+        reg_host, reg_port = await self._resolve_registrar()
         uri = f"sip:{device_id}@{reg_host}:{reg_port}"
         try:
             await self._unregister_flow(device_id, uri, (reg_host, reg_port), timeout, state)
@@ -1632,7 +2096,7 @@ class DeviceSimulator:
     ) -> None:
         loop = asyncio.get_running_loop()
         transport, protocol = await loop.create_datagram_endpoint(
-            _ClientProtocol, local_addr=("127.0.0.1", 0)
+            _ClientProtocol, local_addr=("0.0.0.0", 0)
         )
         try:
             local_port = transport.get_extra_info("sockname")[1]
@@ -1733,7 +2197,7 @@ class DeviceSimulator:
     ) -> None:
         loop = asyncio.get_running_loop()
         transport, protocol = await loop.create_datagram_endpoint(
-            _ClientProtocol, local_addr=("127.0.0.1", 0)
+            _ClientProtocol, local_addr=("0.0.0.0", 0)
         )
         try:
             local_port = transport.get_extra_info("sockname")[1]
@@ -1845,16 +2309,34 @@ class DeviceSimulator:
         expires_value = self._settings.gb_expires if expires is None else expires
         contact_port = contact_port or local_port
         return [
-            ("Via", f"SIP/2.0/UDP 127.0.0.1:{local_port};branch={branch};rport"),
+            ("Via", f"SIP/2.0/UDP {self._settings.gb_advertise_ip}:{local_port};branch={branch};rport"),
             ("From", f"<{uri}>;tag={from_tag}"),
             ("To", f"<{uri}>"),
             ("Call-ID", call_id),
             ("CSeq", f"{cseq} REGISTER"),
-            ("Contact", f"<sip:{device_id}@127.0.0.1:{contact_port}>"),
+            ("Contact", f"<sip:{device_id}@{self._settings.gb_advertise_ip}:{contact_port}>"),
             ("Max-Forwards", "70"),
             ("Expires", str(expires_value)),
             ("User-Agent", USER_AGENT),
         ]
+
+    async def _resolve_registrar(self) -> tuple[str, int]:
+        """将 registrar 主机名解析为 IPv4 地址。
+
+        UDP sendto 不接受主机名（会抛 socket family mismatch or a DNS lookup is
+        required），必须显式 getaddrinfo 解析；解析失败时降级返回原始主机名。
+        """
+        host, port = self._split_addr(self._settings.effective_gb_registrar_addr)
+        loop = asyncio.get_running_loop()
+        try:
+            infos = await loop.getaddrinfo(
+                host, port, type=socket.SOCK_DGRAM, family=socket.AF_INET
+            )
+            if infos:
+                return infos[0][4][0], port
+        except OSError:
+            logger.warning("registrar DNS 解析失败，使用原始主机名: %s", host)
+        return host, port
 
     @staticmethod
     def _split_addr(addr: str) -> tuple[str, int]:

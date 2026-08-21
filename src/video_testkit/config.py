@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # ---- GB28181 Device Simulator ----
     # 设备向哪个 Registrar 注册；留空时使用内置 Registrar 地址。
     gb_registrar_addr: str = ""
+    # 设备通告给 Provider 的自身 IP（SIP Via/From/Contact 与 SDP 中的地址；
+    # 容器化部署时必须是容器内可达的地址，不能用 127.0.0.1）。
+    gb_advertise_ip: str = "127.0.0.1"
     gb_password: str = "12345678"
     gb_realm: str = "3402000000"
     # 注册有效期秒数；下限 1 秒以支持确定性短界限测试，不等待真实 3600 秒。
